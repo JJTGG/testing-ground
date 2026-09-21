@@ -264,3 +264,44 @@ footer {
     min-height: auto;
   }
 }
+
+.run-links {
+  margin-top: 28px;
+}
+
+.run-count {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.run-link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 16px 0;
+  border-top: 1px solid var(--border);
+  color: var(--foreground);
+  text-decoration: none;
+}
+
+.run-link:hover {
+  color: var(--accent);
+}
+
+.run-link span {
+  color: inherit;
+  font-size: 14px;
+}
+
+.run-link strong {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
