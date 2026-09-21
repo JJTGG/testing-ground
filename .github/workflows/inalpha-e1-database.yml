@@ -1,0 +1,83 @@
+name: Inalpha E1 Database
+
+on:
+  workflow_dispatch:
+
+jobs:
+  e1-database:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: quant
+          POSTGRES_PASSWORD: devpass
+          POSTGRES_DB: inalpha
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U quant -d inalpha"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    steps:
+      - name: Checkout Testing Ground
+        uses: actions/checkout@v4
+
+      - name: Checkout Inalpha
+        uses: actions/checkout@v4
+        with:
+          repository: mirror29/inalpha
+          ref: 3da8b103d61fc3c6af82ea479beade0cd7436e57
+          path: inalpha
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install migration dependencies
+        working-directory: inalpha/infra/migrations
+        run: uv sync --group dev
+
+      - name: Create disposable test database
+        env:
+          PGPASSWORD: devpass
+        run: |
+          psql \
+            -h 127.0.0.1 \
+            -p 5433 \
+            -U quant \
+            -d inalpha \
+            -c 'CREATE DATABASE inalpha_test;'
+
+      - name: Run Inalpha migrations
+        working-directory: inalpha/infra/migrations
+        env:
+          DATABASE_URL: postgresql+psycopg://quant:devpass@127.0.0.1:5433/inalpha_test
+        run: |
+          uv run alembic upgrade head
+
+      - name: Install Evolver dependencies
+        working-directory: inalpha/services/evolver
+        run: uv sync --group dev
+
+      - name: Run DB-backed E1 storage test
+        working-directory: inalpha/services/evolver
+        env:
+          EVOLVER_TEST_DATABASE_URL: postgresql+psycopg://quant:devpass@127.0.0.1:5433/inalpha_test
+        run: |
+          set -o pipefail
+          uv run pytest \
+            tests/test_storage_integration.py::test_run_idempotency_owner_scope_and_slot \
+            -v \
+            2>&1 | tee ../../../inalpha-e1-database-output.txt
+
+      - name: Upload database test output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inalpha-e1-database-output
+          path: inalpha-e1-database-output.txt
