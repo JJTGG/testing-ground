@@ -226,11 +226,13 @@ jobs:
               assert result.report["validation"] is not None
               assert result.fitness is not None
               assert result.overfitting_risk in {"low", "medium", "high"}
+
               assert set(result.behavior) == {
                   "signal",
                   "trade",
                   "holding",
               }
+
               assert len(result.behavior["signal"]) == 32
 
               expected_epoch = int(
@@ -259,7 +261,8 @@ jobs:
               print("✅ Frozen E1 evaluation boundary completed successfully")
 
 
-          asyncio.run(main())
+          if __name__ == "__main__":
+              asyncio.run(main())
           PY
 
       - name: Run frozen evaluation
