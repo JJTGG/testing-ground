@@ -1,6 +1,6 @@
 # Inalpha Execution
 
-This document defines how Inalpha is expected to be executed for Experiment #001.
+This document defines how Inalpha is executed for Experiment #001.
 
 Testing Ground does not execute Inalpha inside the Next.js application.
 
@@ -24,36 +24,58 @@ Inalpha is responsible for:
 - its internal evaluation and backtesting machinery
 - its own execution logic
 
-## Initial approach
+## Execution levels
 
-The first execution should not attempt to reproduce the complete Inalpha production environment unless the test requires it.
+The smallest level capable of answering the test question should be preferred.
 
-We will first identify the smallest runnable Inalpha component that can produce meaningful evidence.
-
-Candidate execution levels:
+Current levels:
 
 1. isolated component/test
 2. service-level execution
 3. reduced end-to-end workflow
 4. complete local stack
 
-The smallest level capable of answering the test question should be preferred.
+## Verified execution
 
-## First objective
+Experiment #001 has now crossed a reduced managed execution boundary.
 
-Establish that a controlled Inalpha test can be executed and its output captured.
+The verified path includes:
 
-The first run should record:
+- disposable TimescaleDB
+- queued run persistence
+- real database queue claim
+- real `execute_frozen_run`
+- real seed evaluation
+- real baseline evaluation
+- deterministic mutation boundary
+- real AST audit
+- real candidate persistence
+- real candidate worker evaluation
+- real fitness calculation
+- real validation
+- real overfitting-risk classification
+- real candidate/run finalization
 
-- Inalpha commit
-- test being executed
-- runtime/environment
-- command used
-- exit status
-- stdout
-- stderr
-- duration
-- relevant generated artifacts
+The successful run is preserved under:
+
+`experiments/inalpha/results/`
+
+## Current limitations
+
+The managed run deliberately replaces two external dependencies:
+
+- the LLM mutation boundary is replaced by a deterministic mutator
+- the production `DataClient` / `FrozenBarsLoader` path is bypassed by injecting a controlled `FrozenDataset`
+
+The dataset is synthetic.
+
+Therefore this run verifies execution boundaries and framework behavior. It does not establish:
+
+- live LLM mutation
+- real market-data behavior
+- strategy quality
+- production deployment behavior
+- hardened hostile-code isolation
 
 ## LLM dependency
 
@@ -67,11 +89,21 @@ LLM-dependent tests must explicitly record:
 
 A provider key must never be committed to the repository or included in preserved run evidence.
 
-## Current state
+## Evidence rule
 
-No Inalpha execution has been performed through Testing Ground yet.
+Each meaningful run should preserve:
 
-This document describes the intended boundary, not a completed execution.
+- Inalpha revision
+- test definition
+- execution environment
+- inputs or dataset identifiers where available
+- output
+- errors
+- relevant statistical results
+- observations
+- manual interventions
+
+Results should remain tied to the exact revision that produced them.
 
 ## Rule
 
