@@ -1,0 +1,389 @@
+name: Inalpha E1 Managed Run
+
+on:
+  workflow_dispatch:
+
+jobs:
+  e1-managed-run:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: timescale/timescaledb:latest-pg17
+        env:
+          POSTGRES_USER: quant
+          POSTGRES_PASSWORD: devpass
+          POSTGRES_DB: inalpha
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U quant -d inalpha"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    steps:
+      - name: Checkout Testing Ground
+        uses: actions/checkout@v4
+
+      - name: Checkout Inalpha
+        uses: actions/checkout@v4
+        with:
+          repository: mirror29/inalpha
+          ref: 3da8b103d61fc3c6af82ea479beade0cd7436e57
+          path: inalpha
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install migration dependencies
+        working-directory: inalpha/infra/migrations
+        run: uv sync --group dev
+
+      - name: Create disposable test database
+        env:
+          PGPASSWORD: devpass
+        run: |
+          psql \
+            -h 127.0.0.1 \
+            -p 5433 \
+            -U quant \
+            -d inalpha \
+            -c 'CREATE DATABASE inalpha_test;'
+
+      - name: Run Inalpha migrations
+        working-directory: inalpha/infra/migrations
+        env:
+          DATABASE_URL: postgresql+psycopg://quant:devpass@127.0.0.1:5433/inalpha_test
+        run: |
+          uv run alembic upgrade head
+
+      - name: Install Evolver dependencies
+        working-directory: inalpha/services/evolver
+        run: uv sync --group dev
+
+      - name: Create managed-run harness
+        working-directory: inalpha/services/evolver
+        run: |
+          cat > /tmp/inalpha_e1_managed_run.py <<'PY'
+          from __future__ import annotations
+
+          import asyncio
+          import hashlib
+          from datetime import UTC, datetime, timedelta
+          from difflib import unified_diff
+          from uuid import uuid4
+
+          from inalpha_paper.kernel.identifiers import InstrumentId
+          from inalpha_paper.model.data import Bar
+          from inalpha_shared.db import close_pool, get_conn, init_pool
+
+          from inalpha_evolver.config import EvolverSettings
+          from inalpha_evolver.data.manifest import DatasetManifest, FrozenDataset
+          from inalpha_evolver.governor.seed import SEED_STRATEGY_CODE
+          from inalpha_evolver.mutator.llm_client import MutationResult
+          from inalpha_evolver.runtime.executor import execute_frozen_run
+          from inalpha_evolver.storage import candidates, run_queries, runs
+
+          DATABASE_URL = (
+              "postgresql+psycopg://quant:devpass@127.0.0.1:5433/inalpha_test"
+          )
+
+
+          def build_dataset() -> FrozenDataset:
+              instrument = InstrumentId(symbol="BTCUSDT", venue="binance")
+              start = datetime(2026, 1, 1, tzinfo=UTC)
+
+              bars = tuple(
+                  Bar(
+                      instrument_id=instrument,
+                      timeframe="1h",
+                      open=100.0 + index,
+                      high=101.0 + index,
+                      low=99.0 + index,
+                      close=100.5 + index,
+                      volume=10.0,
+                      ts_event=int(
+                          (start + timedelta(hours=index)).timestamp() * 1e9
+                      ),
+                      ts_init=int(
+                          (start + timedelta(hours=index)).timestamp() * 1e9
+                      ),
+                  )
+                  for index in range(60)
+              )
+
+              effective_to = start + timedelta(hours=59)
+
+              manifest = DatasetManifest(
+                  venue="binance",
+                  symbol="BTCUSDT",
+                  requested_timeframe="1h",
+                  data_timeframe="1h",
+                  canonical_timeframe="1h",
+                  requested_from=start,
+                  requested_as_of=start + timedelta(hours=61),
+                  effective_from=start,
+                  effective_to=effective_to,
+                  latest_bar_ts=effective_to,
+                  cutoff_bar_ts=effective_to,
+                  data_epoch=int(effective_to.timestamp() * 1000),
+                  bar_count=len(bars),
+                  freshness_lag_seconds=0,
+                  annualization_periods=8760,
+                  calendar_code=None,
+                  content_sha256="a" * 64,
+                  backfill={
+                      "venue": "binance",
+                      "symbol": "BTCUSDT",
+                      "timeframe": "1h",
+                      "bars_fetched": len(bars),
+                      "bars_inserted": len(bars),
+                      "from_ts": start,
+                      "to_ts": start + timedelta(hours=61),
+                  },
+              )
+
+              return FrozenDataset(bars=bars, manifest=manifest)
+
+
+          class DeterministicMutator:
+              """
+              Replace only the LLM decision boundary.
+
+              Everything after mutation remains production Inalpha code:
+              AST audit, candidate persistence, evaluation, fitness,
+              validation, and final run persistence.
+              """
+
+              calls = 0
+
+              async def mutate(
+                  self,
+                  current_source: str,
+                  report: dict | None = None,
+                  hint: str = "",
+              ) -> MutationResult:
+                  self.calls += 1
+
+                  replacement = current_source.replace(
+                      "trade_size=0.01",
+                      "trade_size=0.02",
+                  )
+
+                  if replacement == current_source:
+                      raise AssertionError(
+                          "deterministic mutation did not change the seed source"
+                      )
+
+                  diff = "".join(
+                      unified_diff(
+                          current_source.splitlines(keepends=True),
+                          replacement.splitlines(keepends=True),
+                          fromfile="a/strategy.py",
+                          tofile="b/strategy.py",
+                      )
+                  ).strip()
+
+                  return MutationResult(
+                      new_source=replacement,
+                      unified_diff=diff,
+                      source_hash=hashlib.sha256(
+                          replacement.encode()
+                      ).hexdigest(),
+                      llm_cost_usd=0.0,
+                      cache_hit_tokens=0,
+                      input_tokens=0,
+                      output_tokens=0,
+                  )
+
+
+          async def main() -> None:
+              await init_pool(DATABASE_URL)
+
+              owner = uuid4()
+              now = datetime.now(UTC)
+
+              config = {
+                  "venue": "binance",
+                  "symbol": "BTCUSDT",
+                  "timeframe": "1h",
+                  "from_ts": now - timedelta(days=1),
+                  "as_of": now,
+                  "initial_cash": 10_000.0,
+                  "fee_rate": 0.001,
+                  "validation_split": 0.3,
+                  "trading_mode": "spot",
+                  "leverage": 1,
+                  "funding_rate": 0.0,
+              }
+
+              llm_snapshot = {
+                  "config_id": "testing-ground-managed-run",
+                  "provider": "deterministic-test",
+                  "model": "none",
+                  "base_url": "http://127.0.0.1",
+                  "pricing": {
+                      "version": "testing-ground",
+                      "currency": "USD",
+                      "input_usd_per_million": 0.0,
+                      "output_usd_per_million": 0.0,
+                      "assumed_input_tokens": 0,
+                      "max_output_tokens": 0,
+                      "estimated_max_usd_per_candidate": 0.0,
+                  },
+                  "config_digest": "testing-ground-managed-run",
+              }
+
+              try:
+                  async with get_conn() as conn:
+                      inserted, created = await runs.insert_run(
+                          conn,
+                          owner_account_id=owner,
+                          requested_by_sub="testing-ground-e1-managed-run",
+                          idempotency_key=f"testing-ground-{uuid4()}",
+                          request_hash="testing-ground-managed-run",
+                          seed_strategy_id="sma_cross_v1",
+                          seed_source=SEED_STRATEGY_CODE,
+                          seed_hash=hashlib.sha256(
+                              SEED_STRATEGY_CODE.encode()
+                          ).hexdigest(),
+                          budget=1,
+                          config=config,
+                          llm_snapshot=llm_snapshot,
+                          llm_credential_grant="deterministic-test-grant",
+                          queued_at=now,
+                      )
+
+                      assert created is True
+                      assert inserted["status"] == "queued"
+
+                  async with get_conn() as conn:
+                      claimed = await run_queries.claim_next(conn)
+
+                  assert claimed is not None
+                  assert claimed["run_id"] == inserted["run_id"]
+                  assert claimed["status"] == "running"
+
+                  dataset = build_dataset()
+                  mutator = DeterministicMutator()
+
+                  settings = EvolverSettings(
+                      database_url=DATABASE_URL,
+                      evolver_job_timeout_s=60,
+                      evolver_job_mem_gb=1,
+                  )
+
+                  await execute_frozen_run(
+                      claimed,
+                      dataset=dataset,
+                      mutator=mutator,
+                      settings=settings,
+                  )
+
+                  async with get_conn() as conn:
+                      final_run = await runs.get_run(
+                          conn,
+                          claimed["run_id"],
+                          owner,
+                      )
+                      final_candidates = await candidates.list_candidates(
+                          conn,
+                          claimed["run_id"],
+                          owner,
+                      )
+
+                  assert final_run is not None
+                  assert final_run["status"] == "completed"
+                  assert final_run["active_stage"] == "completed"
+                  assert final_run["seed_report_snapshot"] is not None
+                  assert final_run["baseline_snapshot"] is not None
+                  assert final_run["dataset_manifest"] is not None
+
+                  assert len(final_candidates) == 1
+
+                  candidate = final_candidates[0]
+
+                  assert candidate["slot"] == 0
+                  assert candidate["source_code"] is not None
+                  assert candidate["source_hash"] is not None
+                  assert candidate["unified_diff"] is not None
+                  assert candidate["audit_snapshot"] is not None
+                  assert candidate["contract_snapshot"] == {
+                      "ok": True,
+                      "validated_in": "worker",
+                  }
+                  assert candidate["outcome"] == "succeeded"
+                  assert candidate["evaluation_snapshot"] is not None
+                  assert candidate["fitness"] is not None
+                  assert candidate["report"] is not None
+                  assert candidate["overfitting_risk"] is not None
+
+                  assert mutator.calls == 1
+
+                  print("=== Managed E1 Run ===")
+                  print(f"run_id              = {final_run['run_id']}")
+                  print(f"run_status          = {final_run['status']}")
+                  print(f"active_stage        = {final_run['active_stage']}")
+                  print(
+                      "dataset_epoch       = "
+                      f"{dataset.manifest.data_epoch}"
+                  )
+                  print(
+                      "dataset_bar_count   = "
+                      f"{dataset.manifest.bar_count}"
+                  )
+                  print(f"candidate_count     = {len(final_candidates)}")
+                  print(f"candidate_outcome   = {candidate['outcome']}")
+                  print(f"candidate_fitness   = {candidate['fitness']}")
+                  print(
+                      "overfitting_risk    = "
+                      f"{candidate['overfitting_risk']}"
+                  )
+                  print(f"mutator_calls       = {mutator.calls}")
+
+                  print()
+                  print("=== Assertions ===")
+                  print("PASS queued run persisted")
+                  print("PASS real DB queue claim")
+                  print("PASS real execute_frozen_run")
+                  print("PASS real seed evaluation")
+                  print("PASS real baseline evaluation")
+                  print("PASS deterministic mutation boundary")
+                  print("PASS real AST audit")
+                  print("PASS real candidate persistence")
+                  print("PASS real candidate worker evaluation")
+                  print("PASS real fitness")
+                  print("PASS real validation")
+                  print("PASS real overfitting-risk classification")
+                  print("PASS real candidate/run finalization")
+                  print("PASS no LLM provider invoked")
+
+                  print()
+                  print(
+                      "Managed E1 execution boundary completed successfully."
+                  )
+
+              finally:
+                  await close_pool()
+
+
+          if __name__ == "__main__":
+              asyncio.run(main())
+          PY
+
+      - name: Run managed E1 harness
+        working-directory: inalpha/services/evolver
+        run: |
+          set -o pipefail
+          uv run python /tmp/inalpha_e1_managed_run.py \
+            2>&1 | tee ../../../inalpha-e1-managed-run-output.txt
+
+      - name: Upload managed run output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inalpha-e1-managed-run-output
+          path: inalpha-e1-managed-run-output.txt
