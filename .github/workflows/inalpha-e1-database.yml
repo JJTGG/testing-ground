@@ -9,7 +9,7 @@ jobs:
 
     services:
       postgres:
-        image: postgres:17
+        image: timescale/timescaledb:latest-pg17
         env:
           POSTGRES_USER: quant
           POSTGRES_PASSWORD: devpass
