@@ -220,21 +220,25 @@ jobs:
                   "funding_rate": 0.0,
               }
 
+              llm_config_digest = (
+                  "e6edd79eabdccaed743ac72ddeb8ff4d5de550a742e9e931d368c93caf1cca4c"
+              )
+
               llm_snapshot = {
-                  "config_id": "testing-ground-managed-run",
-                  "provider": "deterministic-test",
-                  "model": "none",
-                  "base_url": "http://127.0.0.1",
+                  "config_id": "config-1",
+                  "provider": "deepseek",
+                  "model": "deepseek-flash",
+                  "base_url": "https://api.deepseek.com",
                   "pricing": {
-                      "version": "testing-ground",
+                      "version": "provider-estimate-2026-09",
                       "currency": "USD",
-                      "input_usd_per_million": 0.0,
-                      "output_usd_per_million": 0.0,
-                      "assumed_input_tokens": 0,
-                      "max_output_tokens": 0,
-                      "estimated_max_usd_per_candidate": 0.0,
+                      "input_usd_per_million": 0.3,
+                      "output_usd_per_million": 1.2,
+                      "assumed_input_tokens": 24000,
+                      "max_output_tokens": 8192,
+                      "estimated_max_usd_per_candidate": 0.0170304,
                   },
-                  "config_digest": "testing-ground-managed-run",
+                  "config_digest": llm_config_digest,
               }
 
               try:
@@ -253,7 +257,7 @@ jobs:
                           budget=1,
                           config=config,
                           llm_snapshot=llm_snapshot,
-                          llm_credential_grant="deterministic-test-grant",
+                          llm_credential_grant="deterministic-test-grant-" + "x" * 120,
                           queued_at=now,
                       )
 
