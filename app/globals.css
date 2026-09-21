@@ -141,3 +141,35 @@ footer {
     margin-top: 45px;
   }
 }
+
+  .empty-state {
+  padding: 40px 0;
+  border-top: 1px solid var(--border);
+}
+
+.empty-state h2 {
+  margin: 0 0 12px;
+}
+
+.empty-state p {
+  max-width: 600px;
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.experiment-list {
+  display: grid;
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+}
+
+.experiment-list article {
+  min-height: auto;
+}
+
+.experiment-list article > span {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
