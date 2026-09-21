@@ -1,3 +1,12 @@
 {
-  "experiments": []
+  "experiments": [
+    {
+      "slug": "inalpha",
+      "name": "Inalpha",
+      "status": "active",
+      "description": "Testing an LLM-based open-source quantitative research and strategy evolution framework under controlled conditions.",
+      "repository": "https://github.com/mirror29/inalpha",
+      "site": "https://inalpha.dev"
+    }
+  ]
 }
