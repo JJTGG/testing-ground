@@ -1,0 +1,43 @@
+name: Inalpha Engine Smoke
+
+on:
+  workflow_dispatch:
+
+jobs:
+  engine-smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Testing Ground
+        uses: actions/checkout@v4
+
+      - name: Checkout Inalpha
+        uses: actions/checkout@v4
+        with:
+          repository: mirror29/inalpha
+          ref: 3da8b103d61fc3c6af82ea479beade0cd7436e57
+          path: inalpha
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install Paper dependencies
+        working-directory: inalpha/services/paper
+        run: uv sync --group dev
+
+      - name: Run DB-free engine smoke
+        working-directory: inalpha/services/paper
+        run: |
+          set -o pipefail
+          printf '%s\n' '{"version":"strategy_v1","signals":[{"ts":1700010800000,"side":"BUY","qty":0.5},{"ts":1700025200000,"side":"SELL","qty":0.5}]}' \
+            | uv run --quiet python scripts/smoke_e1_replay.py \
+            2>&1 | tee ../../../inalpha-engine-smoke-output.txt
+
+      - name: Upload smoke output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inalpha-engine-smoke-output
+          path: inalpha-engine-smoke-output.txt
