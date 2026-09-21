@@ -1,0 +1,310 @@
+name: Inalpha Real Candidate Evaluation
+
+on:
+  workflow_dispatch:
+
+jobs:
+  real-candidate-evaluation:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Testing Ground
+        uses: actions/checkout@v4
+
+      - name: Checkout Inalpha
+        uses: actions/checkout@v4
+        with:
+          repository: mirror29/inalpha
+          ref: 3da8b103d61fc3c6af82ea479beade0cd7436e57
+          path: inalpha
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install Paper dependencies
+        working-directory: inalpha/services/paper
+        run: uv sync --group dev
+
+      - name: Create real candidate evaluation harness
+        working-directory: inalpha/services/paper
+        run: |
+          cat > /tmp/test_real_candidate_evaluation.py <<'PY'
+          from __future__ import annotations
+
+          import asyncio
+          import json
+          import math
+          from datetime import UTC, datetime, timedelta
+          from typing import Any
+
+          from inalpha_paper.engine.backtest import BacktestEngine
+          from inalpha_paper.kernel.identifiers import InstrumentId
+          from inalpha_paper.model.data import Bar
+          from inalpha_paper.strategy_authoring import (
+              load_strategy_class,
+              verify_strategy_contract,
+          )
+          from inalpha_paper.strategy_evaluation import evaluate_strategy_source
+
+
+          CANDIDATE_SOURCE = """
+          class LLMSmaCross(Strategy):
+              def __init__(
+                  self,
+                  name,
+                  clock,
+                  msgbus,
+                  instrument_id,
+                  timeframe="1h",
+                  fast_period=3,
+                  slow_period=6,
+                  trade_size=0.01,
+              ):
+                  if fast_period >= slow_period:
+                      raise ValueError("fast must < slow")
+                  super().__init__(name, clock, msgbus)
+                  self._instrument_id = instrument_id
+                  self._timeframe = timeframe
+                  self._fast = fast_period
+                  self._slow = slow_period
+                  self._trade_size = trade_size
+                  self._closes = deque(maxlen=slow_period)
+                  self._prev_fast = None
+                  self._prev_slow = None
+                  self._is_long = False
+
+              def on_start(self):
+                  self.subscribe_bars(self._instrument_id, self._timeframe)
+
+              def on_bar(self, bar):
+                  if bar.instrument_id != self._instrument_id:
+                      return
+
+                  self._closes.append(bar.close)
+
+                  if len(self._closes) < self._slow:
+                      return
+
+                  fast = sum(list(self._closes)[-self._fast:]) / self._fast
+                  slow = sum(self._closes) / self._slow
+
+                  if self._prev_fast is not None and self._prev_slow is not None:
+                      crossed_up = (
+                          self._prev_fast <= self._prev_slow
+                          and fast > slow
+                      )
+                      crossed_down = (
+                          self._prev_fast >= self._prev_slow
+                          and fast < slow
+                      )
+
+                      if crossed_up and not self._is_long:
+                          self._submit(OrderSide.BUY)
+                      elif crossed_down and self._is_long:
+                          self._submit(OrderSide.SELL)
+
+                  self._prev_fast = fast
+                  self._prev_slow = slow
+
+              def on_position_opened(self, event):
+                  self._is_long = event.quantity > 0
+
+              def on_position_closed(self, event):
+                  self._is_long = False
+
+              def _submit(self, side):
+                  order = Order(
+                      client_order_id=ClientOrderId(
+                          "real-eval-" + uuid4().hex[:8]
+                      ),
+                      instrument_id=self._instrument_id,
+                      side=side,
+                      type=OrderType.MARKET,
+                      quantity=self._trade_size,
+                  )
+                  self.submit_order(order)
+          """
+
+
+          def build_bars(
+              count: int = 60,
+          ) -> tuple[InstrumentId, list[Bar]]:
+              instrument_id = InstrumentId(
+                  symbol="BTC/USDT",
+                  venue="binance",
+              )
+
+              base_ts = int(
+                  datetime(
+                      2026,
+                      1,
+                      1,
+                      tzinfo=UTC,
+                  ).timestamp()
+                  * 1_000_000_000
+              )
+
+              interval_ns = int(
+                  timedelta(hours=1).total_seconds()
+                  * 1_000_000_000
+              )
+
+              bars: list[Bar] = []
+
+              for index in range(count):
+                  price = 100.0 + 10.0 * math.sin(index * 0.4)
+
+                  bars.append(
+                      Bar(
+                          instrument_id=instrument_id,
+                          timeframe="1h",
+                          open=price,
+                          high=price + 0.5,
+                          low=price - 0.5,
+                          close=price,
+                          volume=1.0,
+                          ts_event=base_ts + index * interval_ns,
+                          ts_init=base_ts + index * interval_ns,
+                      )
+                  )
+
+              return instrument_id, bars
+
+
+          async def real_engine(**kwargs: Any):
+              source = kwargs["candidate_code"]
+              bars = kwargs["bars"]
+              instrument_id = kwargs["instrument_id"]
+
+              print("→ loading candidate source")
+
+              strategy_class = load_strategy_class(source)
+              verify_strategy_contract(strategy_class)
+
+              print(
+                  f"→ loaded strategy class: "
+                  f"{strategy_class.__name__}"
+              )
+
+              engine = BacktestEngine(
+                  initial_cash=kwargs["initial_cash"],
+                  fee_rate=kwargs["fee_rate"],
+              )
+
+              strategy = strategy_class(
+                  name="real-candidate-evaluation",
+                  clock=engine.clock,
+                  msgbus=engine.msgbus,
+                  instrument_id=instrument_id,
+                  timeframe=kwargs["timeframe"],
+                  fast_period=3,
+                  slow_period=6,
+                  trade_size=0.01,
+              )
+
+              engine.add_strategy(strategy)
+
+              print(
+                  f"→ running real BacktestEngine "
+                  f"on {len(bars)} bars"
+              )
+
+              return engine.run(bars)
+
+
+          async def main() -> None:
+              instrument_id, bars = build_bars()
+
+              print("═══════════════════════════════════════════════════════")
+              print(" Real Candidate → Backtest → Evaluation")
+              print("═══════════════════════════════════════════════════════")
+
+              result = await evaluate_strategy_source(
+                  source_code=CANDIDATE_SOURCE,
+                  bars=bars,
+                  instrument_id=instrument_id,
+                  timeframe="1h",
+                  run_engine=real_engine,
+                  initial_cash=10_000.0,
+                  fee_rate=0.001,
+                  validation_split=0.3,
+                  annualization_periods=8760.0,
+              )
+
+              report = result.report
+              snapshot = result.snapshot
+
+              print()
+              print("───────────────────────────────────────────────────────")
+              print(" Real BacktestReport")
+              print("───────────────────────────────────────────────────────")
+              print(f"  bars_processed = {report.num_bars_processed}")
+              print(f"  trades         = {report.num_trades}")
+              print(f"  final_equity   = {report.final_equity:.4f}")
+              print(f"  return         = {report.total_return_pct:.6f}%")
+              print(f"  sharpe         = {report.sharpe}")
+              print(f"  max_drawdown   = {report.max_drawdown_pct:.6f}%")
+
+              print()
+              print("───────────────────────────────────────────────────────")
+              print(" EvaluationSnapshot")
+              print("───────────────────────────────────────────────────────")
+              print(f"  fitness        = {snapshot.fitness}")
+              print(f"  validation     = {snapshot.validation is not None}")
+
+              dumped = snapshot.model_dump(mode="json")
+
+              assert report.num_bars_processed == 60
+              assert report.num_trades > 0
+              assert report.final_equity > 0
+              assert snapshot.fitness != 0
+              assert snapshot.validation is not None
+              assert "equity_curve" not in dumped
+
+              json.dumps(dumped)
+
+              print()
+              print("───────────────────────────────────────────────────────")
+              print(" VERIFIED CHAIN")
+              print("───────────────────────────────────────────────────────")
+              print("  candidate source")
+              print("      ↓")
+              print("  audit_strategy_source")
+              print("      ↓")
+              print("  load_strategy_class")
+              print("      ↓")
+              print("  verify_strategy_contract")
+              print("      ↓")
+              print("  real BacktestEngine")
+              print("      ↓")
+              print("  real BacktestReport")
+              print("      ↓")
+              print("  evaluate_strategy_source")
+              print("      ↓")
+              print("  fitness + validation")
+              print("      ↓")
+              print("  EvaluationSnapshot")
+              print()
+              print("✅ Real candidate evaluation completed successfully")
+
+
+          if __name__ == "__main__":
+              asyncio.run(main())
+          PY
+
+      - name: Run real candidate evaluation
+        working-directory: inalpha/services/paper
+        run: |
+          set -o pipefail
+
+          uv run --quiet python /tmp/test_real_candidate_evaluation.py \
+            2>&1 | tee ../../../inalpha-real-candidate-evaluation-output.txt
+
+      - name: Upload evaluation output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inalpha-real-candidate-evaluation-output
+          path: inalpha-real-candidate-evaluation-output.txt
