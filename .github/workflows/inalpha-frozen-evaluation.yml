@@ -1,0 +1,277 @@
+name: Inalpha Frozen Evaluation
+
+on:
+  workflow_dispatch:
+
+jobs:
+  frozen-evaluation:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Testing Ground
+        uses: actions/checkout@v4
+
+      - name: Checkout Inalpha
+        uses: actions/checkout@v4
+        with:
+          repository: mirror29/inalpha
+          ref: 3da8b103d61fc3c6af82ea479beade0cd7436e57
+          path: inalpha
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install Evolver dependencies
+        working-directory: inalpha/services/evolver
+        run: uv sync --group dev
+
+      - name: Create frozen evaluation harness
+        working-directory: inalpha/services/evolver
+        run: |
+          cat > /tmp/test_frozen_evaluation.py <<'PY'
+          from __future__ import annotations
+
+          import asyncio
+          import hashlib
+          import math
+          from datetime import UTC, datetime, timedelta
+
+          from inalpha_paper.evaluation_executor import KillableEngineRunner
+          from inalpha_paper.kernel.identifiers import InstrumentId
+          from inalpha_paper.model.data import Bar
+
+          from inalpha_evolver.data.manifest import DatasetManifest, FrozenDataset
+          from inalpha_evolver.evaluator.frozen import FrozenDatasetEvaluator
+
+
+          SOURCE = """
+          class FrozenProbe(Strategy):
+              def __init__(
+                  self,
+                  name,
+                  clock,
+                  msgbus,
+                  instrument_id,
+                  timeframe="1h",
+              ):
+                  super().__init__(name, clock, msgbus)
+                  self.instrument = instrument_id
+                  self.timeframe = timeframe
+                  self.count = 0
+
+              def on_start(self):
+                  self.subscribe_bars(self.instrument, self.timeframe)
+
+              def on_bar(self, bar):
+                  self.count += 1
+
+                  if self.count == 5:
+                      self.submit_order(Order(
+                          client_order_id=ClientOrderId("frozen-buy"),
+                          instrument_id=self.instrument,
+                          side=OrderSide.BUY,
+                          type=OrderType.MARKET,
+                          quantity=1.0,
+                      ))
+
+                  if self.count == 25:
+                      self.submit_order(Order(
+                          client_order_id=ClientOrderId("frozen-sell"),
+                          instrument_id=self.instrument,
+                          side=OrderSide.SELL,
+                          type=OrderType.MARKET,
+                          quantity=1.0,
+                      ))
+          """
+
+
+          def build_dataset() -> FrozenDataset:
+              instrument = InstrumentId(
+                  symbol="BTCUSDT",
+                  venue="binance",
+              )
+
+              start = datetime(2026, 1, 1, tzinfo=UTC)
+
+              bars = []
+
+              for index in range(60):
+                  ts = start + timedelta(hours=index)
+
+                  # Deterministic oscillating synthetic market.
+                  close = (
+                      100.0
+                      + index * 0.08
+                      + math.sin(index / 3.0) * 2.0
+                  )
+
+                  bars.append(
+                      Bar(
+                          instrument_id=instrument,
+                          timeframe="1h",
+                          open=close - 0.2,
+                          high=close + 0.5,
+                          low=close - 0.5,
+                          close=close,
+                          volume=100.0,
+                          ts_event=int(ts.timestamp() * 1e9),
+                          ts_init=int(ts.timestamp() * 1e9),
+                      )
+                  )
+
+              bars = tuple(bars)
+
+              canonical = "\n".join(
+                  f"{bar.ts_event},{bar.open},{bar.high},{bar.low},{bar.close},{bar.volume}"
+                  for bar in bars
+              ).encode()
+
+              content_hash = hashlib.sha256(canonical).hexdigest()
+
+              manifest = DatasetManifest(
+                  venue="binance",
+                  symbol="BTCUSDT",
+                  requested_timeframe="1h",
+                  data_timeframe="1h",
+                  canonical_timeframe="1h",
+                  requested_from=start,
+                  requested_as_of=start + timedelta(hours=61),
+                  effective_from=start,
+                  effective_to=start + timedelta(hours=59),
+                  latest_bar_ts=start + timedelta(hours=59),
+                  cutoff_bar_ts=start + timedelta(hours=59),
+                  freshness_lag_seconds=0,
+                  data_epoch=1,
+                  bar_count=len(bars),
+                  annualization_periods=8760,
+                  calendar_code=None,
+                  content_sha256=content_hash,
+                  backfill={
+                      "venue": "binance",
+                      "symbol": "BTCUSDT",
+                      "timeframe": "1h",
+                      "bars_fetched": len(bars),
+                      "bars_inserted": len(bars),
+                      "from_ts": start,
+                      "to_ts": start + timedelta(hours=61),
+                  },
+              )
+
+              return FrozenDataset(
+                  bars=bars,
+                  manifest=manifest,
+              )
+
+
+          async def main() -> None:
+              dataset = build_dataset()
+
+              runner = KillableEngineRunner(
+                  timeout_s=30.0,
+                  mem_gb=1.0,
+              )
+
+              evaluator = FrozenDatasetEvaluator(
+                  dataset=dataset,
+                  runner=runner,
+                  initial_cash=10_000.0,
+                  fee_rate=0.001,
+                  validation_split=0.3,
+                  trading_mode="spot",
+                  leverage=1,
+              )
+
+              print("=== Frozen Dataset ===")
+              print(f"bars          = {len(dataset.bars)}")
+              print(f"venue         = {dataset.manifest.venue}")
+              print(f"symbol        = {dataset.manifest.symbol}")
+              print(f"timeframe     = {dataset.manifest.canonical_timeframe}")
+              print(f"data_epoch    = {dataset.manifest.data_epoch}")
+              print(f"content_hash  = {dataset.manifest.content_sha256}")
+
+              print()
+              print("=== Baseline ===")
+
+              baseline = await evaluator.evaluate_baseline()
+
+              print(f"baseline final_equity = {baseline['final_equity']}")
+              print(f"baseline return        = {baseline['total_return_pct']}%")
+              print(f"baseline trades        = {baseline['num_trades']}")
+
+              print()
+              print("=== Candidate ===")
+
+              result = await evaluator.evaluate(SOURCE)
+
+              print(f"report schema          = {result.report['schema_version']}")
+              print(f"bars processed         = {result.report['num_bars_processed']}")
+              print(f"trades                 = {result.report['num_trades']}")
+              print(f"final equity           = {result.report['final_equity']}")
+              print(f"return                 = {result.report['total_return_pct']}%")
+              print(f"sharpe                 = {result.report['sharpe']}")
+              print(f"max drawdown           = {result.report['max_drawdown_pct']}%")
+              print(f"fitness                = {result.fitness}")
+              print(f"data epoch             = {result.data_epoch}")
+              print(f"overfitting risk       = {result.overfitting_risk}")
+              print(f"validation present     = {'validation' in result.report}")
+              print(f"behavior keys          = {sorted(result.behavior.keys())}")
+              print(f"event metrics          = {result.execution_event_metrics}")
+
+              assert result.report["schema_version"] == "e1.report.v1"
+              assert result.report["num_bars_processed"] == 60
+              assert result.report["num_trades"] >= 2
+              assert result.report["final_equity"] > 0
+              assert result.report["validation"] is not None
+              assert result.fitness is not None
+              assert result.overfitting_risk in {"low", "medium", "high"}
+              assert set(result.behavior) == {
+                  "signal",
+                  "trade",
+                  "holding",
+              }
+              assert len(result.behavior["signal"]) == 32
+
+              expected_epoch = int(
+                  dataset.manifest.latest_bar_ts.timestamp() * 1000
+              )
+
+              assert result.data_epoch == expected_epoch
+
+              assert "equity_curve" not in result.report
+
+              print()
+              print("=== Assertions ===")
+              print("✅ FrozenDataset constructed")
+              print("✅ Real KillableEngineRunner used")
+              print("✅ Real FrozenDatasetEvaluator used")
+              print("✅ Baseline evaluated on frozen bars")
+              print("✅ Candidate evaluated on same frozen bars")
+              print("✅ Real BacktestReport produced")
+              print("✅ Fitness produced")
+              print("✅ Validation produced")
+              print("✅ Overfitting-risk classification produced")
+              print("✅ Behavior fingerprint produced")
+              print("✅ Snapshot excludes equity_curve")
+              print("✅ No Postgres dependency in this execution path")
+              print()
+              print("✅ Frozen E1 evaluation boundary completed successfully")
+
+
+          asyncio.run(main())
+          PY
+
+      - name: Run frozen evaluation
+        working-directory: inalpha/services/evolver
+        run: |
+          set -o pipefail
+          uv run --quiet python /tmp/test_frozen_evaluation.py \
+            2>&1 | tee ../../../inalpha-frozen-evaluation-output.txt
+
+      - name: Upload evaluation output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inalpha-frozen-evaluation-output
+          path: inalpha-frozen-evaluation-output.txt
