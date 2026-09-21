@@ -1,7 +1,11 @@
+import Link from "next/link";
+
 import { getExperiments } from "../../core/registry";
+import { getRuns } from "../../core/results/reader";
 
 export default function ExperimentsPage() {
   const experiments = getExperiments();
+  const runs = getRuns();
 
   return (
     <main>
@@ -29,13 +33,41 @@ export default function ExperimentsPage() {
           </div>
         ) : (
           <div className="experiment-list">
-            {experiments.map((experiment) => (
-              <article key={experiment.slug}>
-                <span>{experiment.status}</span>
-                <h2>{experiment.name}</h2>
-                <p>{experiment.description}</p>
-              </article>
-            ))}
+            {experiments.map((experiment) => {
+              const experimentRuns = runs.filter(
+                (run) => run.experiment === experiment.slug,
+              );
+
+              return (
+                <article key={experiment.slug}>
+                  <span>{experiment.status}</span>
+
+                  <h2>{experiment.name}</h2>
+
+                  <p>{experiment.description}</p>
+
+                  {experimentRuns.length > 0 && (
+                    <div className="run-links">
+                      <p className="run-count">
+                        {experimentRuns.length}{" "}
+                        {experimentRuns.length === 1 ? "run" : "runs"} recorded
+                      </p>
+
+                      {experimentRuns.map((run) => (
+                        <Link
+                          key={run.run_id}
+                          href={`/runs/${run.run_id}`}
+                          className="run-link"
+                        >
+                          <span>{run.test}</span>
+                          <strong>{run.status}</strong>
+                        </Link>
+                      ))}
+                    </div>
+                  )}
+                </article>
+              );
+            })}
           </div>
         )}
       </section>
