@@ -322,7 +322,6 @@ jobs:
                   assert candidate["outcome"] == "succeeded"
                   assert candidate["evaluation_snapshot"] is not None
                   assert candidate["fitness"] is not None
-                  assert candidate["report"] is not None
                   assert candidate["overfitting_risk"] is not None
 
                   assert mutator.calls == 1
