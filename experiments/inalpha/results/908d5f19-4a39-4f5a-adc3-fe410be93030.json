@@ -1,0 +1,54 @@
+{
+  "run_id": "908d5f19-4a39-4f5a-adc3-fe410be93030",
+  "experiment": "inalpha",
+  "test": "E1 managed execution boundary",
+  "revision": "3da8b103d61fc3c6af82ea479beade0cd7436e57",
+  "status": "completed",
+  "environment": {
+    "execution": "GitHub Actions",
+    "database": "TimescaleDB",
+    "database_scope": "disposable test database",
+    "llm_provider_invoked": false
+  },
+  "dataset": {
+    "type": "synthetic",
+    "venue": "binance",
+    "symbol": "BTCUSDT",
+    "timeframe": "1h",
+    "bar_count": 60,
+    "data_epoch": 1767438000000
+  },
+  "candidate": {
+    "count": 1,
+    "outcome": "succeeded",
+    "fitness": 0,
+    "overfitting_risk": "high",
+    "mutation_calls": 1
+  },
+  "verified_boundaries": [
+    "queued run persistence",
+    "real DB queue claim",
+    "real execute_frozen_run",
+    "real seed evaluation",
+    "real baseline evaluation",
+    "deterministic mutation boundary",
+    "real AST audit",
+    "real candidate persistence",
+    "real candidate worker evaluation",
+    "real fitness",
+    "real validation",
+    "real overfitting-risk classification",
+    "real candidate/run finalization"
+  ],
+  "observations": [
+    "The managed E1 execution path completed successfully.",
+    "The test crossed the real database queue, candidate persistence, evaluation, and finalization boundaries.",
+    "The LLM mutation boundary was replaced with a deterministic mutator, so this run does not verify live LLM mutation.",
+    "The dataset was synthetic, so the resulting fitness and overfitting classification are execution evidence rather than evidence of strategy quality.",
+    "The production DataClient and FrozenBarsLoader path was intentionally bypassed by injecting a controlled FrozenDataset."
+  ],
+  "source_artifact": {
+    "name": "inalpha-e1-managed-run-output",
+    "workflow_run": 35578405435
+  }
+}
