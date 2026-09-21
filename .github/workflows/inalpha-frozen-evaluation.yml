@@ -100,7 +100,6 @@ jobs:
               for index in range(60):
                   ts = start + timedelta(hours=index)
 
-                  # Deterministic oscillating synthetic market.
                   close = (
                       100.0
                       + index * 0.08
@@ -206,7 +205,7 @@ jobs:
               result = await evaluator.evaluate(SOURCE)
 
               print(f"report schema          = {result.report['schema_version']}")
-              print(f"bars processed         = {result.report['num_bars_processed']}")
+              print(f"bars processed         = {result.report['num_bars']}")
               print(f"trades                 = {result.report['num_trades']}")
               print(f"final equity           = {result.report['final_equity']}")
               print(f"return                 = {result.report['total_return_pct']}%")
@@ -220,7 +219,7 @@ jobs:
               print(f"event metrics          = {result.execution_event_metrics}")
 
               assert result.report["schema_version"] == "e1.report.v1"
-              assert result.report["num_bars_processed"] == 60
+              assert result.report["num_bars"] == 60
               assert result.report["num_trades"] >= 2
               assert result.report["final_equity"] > 0
               assert result.report["validation"] is not None
