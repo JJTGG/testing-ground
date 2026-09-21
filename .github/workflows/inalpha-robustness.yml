@@ -1,0 +1,45 @@
+name: Inalpha Robustness
+
+on:
+  workflow_dispatch:
+
+jobs:
+  robustness:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Testing Ground
+        uses: actions/checkout@v4
+
+      - name: Checkout Inalpha
+        uses: actions/checkout@v4
+        with:
+          repository: mirror29/inalpha
+          ref: 3da8b103d61fc3c6af82ea479beade0cd7436e57
+          path: inalpha
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install Paper dependencies
+        working-directory: inalpha/services/paper
+        run: uv sync --group dev
+
+      - name: Run DB-free robustness tests
+        working-directory: inalpha/services/paper
+        run: |
+          set -o pipefail
+
+          cp tests/test_robustness.py /tmp/test_robustness.py
+
+          uv run pytest /tmp/test_robustness.py -v \
+            2>&1 | tee ../../../inalpha-robustness-output.txt
+
+      - name: Upload robustness output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inalpha-robustness-output
+          path: inalpha-robustness-output.txt
