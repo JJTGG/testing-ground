@@ -1,0 +1,39 @@
+name: Inalpha Paper E2E
+
+on:
+  workflow_dispatch:
+
+jobs:
+  paper-e2e:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Testing Ground
+        uses: actions/checkout@v4
+
+      - name: Checkout Inalpha
+        uses: actions/checkout@v4
+        with:
+          repository: mirror29/inalpha
+          ref: 3da8b103d61fc3c6af82ea479beade0cd7436e57
+          path: inalpha
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install Paper dependencies
+        working-directory: inalpha/services/paper
+        run: uv sync --group dev
+
+      - name: Run Paper E2E test
+        working-directory: inalpha/services/paper
+        run: uv run pytest tests/test_backtest_e2e.py -v 2>&1 | tee ../../../paper-e2e-output.txt
+
+      - name: Upload test output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inalpha-paper-e2e-output
+          path: paper-e2e-output.txt
