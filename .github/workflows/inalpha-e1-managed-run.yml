@@ -76,19 +76,22 @@ jobs:
           import hashlib
           import json
           import os
-          from datetime import datetime, timezone
+          from datetime import UTC, datetime, timedelta
           from pathlib import Path
-          from uuid import uuid4
 
-          from inalpha_evolver.db import get_conn
+          from inalpha_shared.db import close_pool, get_conn, init_pool
+
+          from inalpha_evolver.config import EvolverSettings
+          from inalpha_evolver.governor.seed import SEED_STRATEGY_CODE
           from inalpha_evolver.runtime.executor import execute_frozen_run
-          from inalpha_evolver.storage import candidates, runs, run_queries
-          from inalpha_evolver.runtime.frozen_dataset import FrozenDataset
+          from inalpha_evolver.storage import candidates, run_queries, runs
+          from inalpha_evolver.data import FrozenDataset
 
 
           TESTING_GROUND_REVISION = os.environ["TESTING_GROUND_REVISION"]
           INALPHA_REVISION = os.environ["INALPHA_REVISION"]
           WORKFLOW_RUN = os.environ.get("GITHUB_RUN_ID", "unknown")
+          DATABASE_URL = os.environ["DATABASE_URL"]
 
 
           class DeterministicMutator:
@@ -97,6 +100,7 @@ jobs:
 
               async def mutate(self, source, report, hint):
                   self.calls += 1
+
                   return {
                       "source": source,
                       "diff": "",
@@ -130,7 +134,7 @@ jobs:
                   bars,
                   sort_keys=True,
                   separators=(",", ":"),
-              ).encode()
+              ).encode("utf-8")
 
               content_hash = hashlib.sha256(canonical).hexdigest()
 
@@ -146,212 +150,226 @@ jobs:
               )
 
 
-          def build_seed_source() -> str:
-              return """from inalpha_paper.strategy_authoring.types import Strategy
-
-          class StrategyImpl(Strategy):
-              def on_bar(self, ctx):
-                  return None
-          """
-
-
           async def main():
-              dataset = build_dataset()
-              seed_source = build_seed_source()
-              mutator = DeterministicMutator()
+              await init_pool(DATABASE_URL)
 
-              run_id = uuid4()
+              try:
+                  dataset = build_dataset()
+                  mutator = DeterministicMutator()
 
-              llm_config_digest = (
-                  "e6edd79eabdccaed743ac72ddeb8ff4d5de550a742e9e931d368c93caf1cca4c"
-              )
+                  owner = __import__("uuid").uuid4()
+                  now = datetime.now(UTC)
 
-              llm_snapshot = {
-                  "config_id": "config-1",
-                  "provider": "deepseek",
-                  "model": "deepseek-flash",
-                  "base_url": "https://api.deepseek.com",
-                  "pricing": {
-                      "version": "provider-estimate-2026-09",
-                      "currency": "USD",
-                      "input_usd_per_million": 0.3,
-                      "output_usd_per_million": 1.2,
-                      "assumed_input_tokens": 24000,
-                      "max_output_tokens": 8192,
-                      "estimated_max_usd_per_candidate": 0.0170304,
-                  },
-                  "config_digest": llm_config_digest,
-              }
+                  seed_source = SEED_STRATEGY_CODE
 
-              run = {
-                  "run_id": run_id,
-                  "owner_account_id": uuid4(),
-                  "status": "queued",
-                  "stage": "queued",
-                  "active_stage": "queued",
-                  "budget": 1,
-                  "seed_source_snapshot": seed_source,
-                  "config": {
+                  seed_hash = hashlib.sha256(
+                      seed_source.encode("utf-8")
+                  ).hexdigest()
+
+                  llm_config_digest = (
+                      "e6edd79eabdccaed743ac72ddeb8ff4d5de550a742e9e931d368c93caf1cca4c"
+                  )
+
+                  llm_snapshot = {
+                      "config_id": "config-1",
+                      "provider": "deepseek",
+                      "model": "deepseek-flash",
+                      "base_url": "https://api.deepseek.com",
+                      "pricing": {
+                          "version": "provider-estimate-2026-09",
+                          "currency": "USD",
+                          "input_usd_per_million": 0.3,
+                          "output_usd_per_million": 1.2,
+                          "assumed_input_tokens": 24000,
+                          "max_output_tokens": 8192,
+                          "estimated_max_usd_per_candidate": 0.0170304,
+                      },
+                      "config_digest": llm_config_digest,
+                  }
+
+                  config = {
                       "venue": dataset.venue,
                       "symbol": dataset.symbol,
                       "timeframe": dataset.timeframe,
-                      "from_ts": dataset.from_ts,
-                      "as_of": dataset.as_of,
+                      "from_ts": now - timedelta(hours=59),
+                      "as_of": now,
                       "initial_cash": 10000.0,
                       "fee_rate": 0.001,
                       "validation_split": 0.5,
                       "trading_mode": "spot",
-                      "leverage": 1.0,
+                      "leverage": 1,
                       "funding_rate": 0.0,
                       "params": {},
-                  },
-                  "llm_snapshot": llm_snapshot,
-                  "llm_config_digest": llm_config_digest,
-                  "llm_credential_grant": (
-                      "deterministic-test-grant-" + "x" * 120
-                  ),
-                  "llm_credential_grant_required": True,
-                  "llm_snapshot_required": True,
-                  "created_at": datetime.now(timezone.utc),
-              }
+                  }
 
-              async with get_conn() as conn:
-                  await runs.insert_run(conn, run)
-
-              async with get_conn() as conn:
-                  claimed = await run_queries.claim_next(conn)
-
-              assert claimed is not None, "queued run was not claimed"
-              assert str(claimed["run_id"]) == str(run_id)
-
-              await execute_frozen_run(
-                  claimed,
-                  dataset=dataset,
-                  mutator=mutator,
-              )
-
-              async with get_conn() as conn:
-                  async with conn.cursor() as cur:
-                      await cur.execute(
-                          """
-                          SELECT *
-                          FROM strategy_evo_runs
-                          WHERE run_id=%s
-                          """,
-                          (run_id,),
+                  async with get_conn() as conn:
+                      row, created = await runs.insert_run(
+                          conn,
+                          owner_account_id=owner,
+                          requested_by_sub="testing-ground-e1",
+                          idempotency_key=f"testing-ground-e1-{WORKFLOW_RUN}",
+                          request_hash=hashlib.sha256(
+                              f"testing-ground-e1-{WORKFLOW_RUN}".encode()
+                          ).hexdigest(),
+                          seed_strategy_id="sma_cross_v1",
+                          seed_source=seed_source,
+                          seed_hash=seed_hash,
+                          budget=1,
+                          config=config,
+                          llm_snapshot=llm_snapshot,
+                          llm_credential_grant=(
+                              "deterministic-test-grant-" + "x" * 120
+                          ),
+                          queued_at=now,
                       )
-                      final_run = await cur.fetchone()
 
-              assert final_run is not None
-              assert final_run["status"] == "completed"
+                  assert created is True
+                  run_id = row["run_id"]
 
-              async with get_conn() as conn:
-                  candidate_rows = await candidates.list_candidates(
-                      conn,
-                      run_id,
-                      claimed["owner_account_id"],
+                  async with get_conn() as conn:
+                      claimed = await run_queries.claim_next(conn)
+
+                  assert claimed is not None
+                  assert claimed["status"] == "running"
+                  assert claimed["run_id"] == run_id
+
+                  settings = EvolverSettings(
+                      DATABASE_URL=DATABASE_URL,
+                      EVOLVER_JOB_TIMEOUT_S=300,
+                      EVOLVER_JOB_MEM_GB=2,
+                      EVOLVER_RUN_TIMEOUT_S=1200,
+                      EVOLVER_POOL_SIZE=5,
+                      EVOLVER_MAX_RUNNING_RUNS=1,
                   )
 
-              assert len(candidate_rows) == 1
+                  await execute_frozen_run(
+                      claimed,
+                      dataset=dataset,
+                      mutator=mutator,
+                      settings=settings,
+                  )
 
-              candidate = candidate_rows[0]
+                  async with get_conn() as conn:
+                      final_run = await runs.get_run(
+                          conn,
+                          run_id,
+                          owner,
+                      )
 
-              assert candidate["outcome"] == "succeeded"
-              assert candidate["evaluation_snapshot"] is not None
-              assert candidate["fitness"] is not None
-              assert candidate["overfitting_risk"] is not None
+                  assert final_run is not None
+                  assert final_run["status"] == "completed"
 
-              evaluation_snapshot = candidate["evaluation_snapshot"]
+                  async with get_conn() as conn:
+                      candidate_rows = await candidates.list_candidates(
+                          conn,
+                          run_id,
+                          owner,
+                      )
 
-              result = {
-                  "run_id": str(run_id),
-                  "testing_ground_revision": TESTING_GROUND_REVISION,
-                  "inalpha_revision": INALPHA_REVISION,
-                  "workflow_run": WORKFLOW_RUN,
-                  "status": final_run["status"],
-                  "environment": {
-                      "execution": "GitHub Actions",
-                      "database": "TimescaleDB",
-                      "database_scope": "disposable test database",
-                      "llm_provider_invoked": False,
-                  },
-                  "dataset": {
-                      "type": "synthetic",
-                      "venue": dataset.venue,
-                      "symbol": dataset.symbol,
-                      "timeframe": dataset.timeframe,
-                      "bar_count": len(dataset.bars),
-                      "data_epoch": dataset.data_epoch,
-                      "content_sha256": dataset.content_sha256,
-                  },
-                  "seed": {
-                      "source_sha256": hashlib.sha256(
-                          seed_source.encode()
-                      ).hexdigest(),
-                      "snapshot": final_run["seed_report_snapshot"],
-                      "baseline_snapshot": final_run["baseline_snapshot"],
-                  },
-                  "candidate": {
-                      "count": len(candidate_rows),
-                      "outcome": candidate["outcome"],
-                      "source_sha256": candidate["source_hash"],
-                      "evaluation_snapshot": evaluation_snapshot,
-                      "fitness": candidate["fitness"],
-                      "overfitting_risk": candidate["overfitting_risk"],
-                      "validation": (
-                          evaluation_snapshot.get("validation")
-                          if isinstance(evaluation_snapshot, dict)
-                          else None
-                      ),
-                      "mutation_calls": mutator.calls,
-                  },
-                  "verified_boundaries": [
-                      "queued run persistence",
-                      "real DB queue claim",
-                      "real execute_frozen_run",
-                      "real seed evaluation",
-                      "real baseline evaluation",
-                      "deterministic mutation boundary",
-                      "real AST audit",
-                      "real candidate persistence",
-                      "real candidate worker evaluation",
-                      "real fitness",
-                      "real validation",
-                      "real overfitting-risk classification",
-                      "real candidate/run finalization",
-                  ],
-                  "observations": [
-                      "The managed E1 execution path completed successfully.",
-                      "The test crossed the real database queue, candidate persistence, evaluation, and finalization boundaries.",
-                      "The LLM mutation boundary was replaced by a deterministic mutator, so this run does not verify live LLM mutation.",
-                      "The dataset was synthetic, so fitness and overfitting classification are execution evidence rather than evidence of strategy quality.",
-                      "The production DataClient and FrozenBarsLoader path was intentionally bypassed by injecting a controlled FrozenDataset.",
-                      "The preserved dataset hash is computed from the exact synthetic bar fixture used by this run.",
-                  ],
-                  "source_artifact": {
-                      "name": "inalpha-e1-managed-run-output",
-                      "workflow_run": (
-                          int(WORKFLOW_RUN)
-                          if WORKFLOW_RUN.isdigit()
-                          else WORKFLOW_RUN
-                      ),
-                  },
-              }
+                  assert len(candidate_rows) == 1
 
-              output = json.dumps(
-                  result,
-                  indent=2,
-                  default=str,
-              )
+                  candidate = candidate_rows[0]
 
-              print(output)
+                  assert candidate["outcome"] == "succeeded"
+                  assert candidate["evaluation_snapshot"] is not None
+                  assert candidate["fitness"] is not None
+                  assert candidate["overfitting_risk"] is not None
 
-              Path(
-                  "../../../inalpha-e1-managed-run-output.json"
-              ).write_text(
-                  output + "\n",
-                  encoding="utf-8",
-              )
+                  evaluation_snapshot = candidate["evaluation_snapshot"]
+
+                  result = {
+                      "run_id": str(run_id),
+                      "testing_ground_revision": TESTING_GROUND_REVISION,
+                      "inalpha_revision": INALPHA_REVISION,
+                      "workflow_run": WORKFLOW_RUN,
+                      "status": final_run["status"],
+                      "environment": {
+                          "execution": "GitHub Actions",
+                          "database": "TimescaleDB",
+                          "database_scope": "disposable test database",
+                          "llm_provider_invoked": False,
+                      },
+                      "dataset": {
+                          "type": "synthetic",
+                          "venue": dataset.venue,
+                          "symbol": dataset.symbol,
+                          "timeframe": dataset.timeframe,
+                          "bar_count": len(dataset.bars),
+                          "data_epoch": dataset.data_epoch,
+                          "content_sha256": dataset.content_sha256,
+                      },
+                      "seed": {
+                          "source_sha256": seed_hash,
+                          "snapshot": final_run["seed_report_snapshot"],
+                          "baseline_snapshot": final_run["baseline_snapshot"],
+                      },
+                      "candidate": {
+                          "count": len(candidate_rows),
+                          "outcome": candidate["outcome"],
+                          "source_sha256": candidate["source_hash"],
+                          "evaluation_snapshot": evaluation_snapshot,
+                          "fitness": candidate["fitness"],
+                          "overfitting_risk": candidate["overfitting_risk"],
+                          "validation": (
+                              evaluation_snapshot.get("validation")
+                              if isinstance(
+                                  evaluation_snapshot,
+                                  dict,
+                              )
+                              else None
+                          ),
+                          "mutation_calls": mutator.calls,
+                      },
+                      "verified_boundaries": [
+                          "queued run persistence",
+                          "real DB queue claim",
+                          "real execute_frozen_run",
+                          "real seed evaluation",
+                          "real baseline evaluation",
+                          "deterministic mutation boundary",
+                          "real AST audit",
+                          "real candidate persistence",
+                          "real candidate worker evaluation",
+                          "real fitness",
+                          "real validation",
+                          "real overfitting-risk classification",
+                          "real candidate/run finalization",
+                      ],
+                      "observations": [
+                          "The managed E1 execution path completed successfully.",
+                          "The test crossed the real database queue, candidate persistence, evaluation, and finalization boundaries.",
+                          "The LLM mutation boundary was replaced by a deterministic mutator, so this run does not verify live LLM mutation.",
+                          "The dataset was synthetic, so fitness and overfitting classification are execution evidence rather than evidence of strategy quality.",
+                          "The production DataClient and FrozenBarsLoader path was intentionally bypassed by injecting a controlled FrozenDataset.",
+                          "The preserved dataset hash is computed from the exact synthetic bar fixture used by this run.",
+                      ],
+                      "source_artifact": {
+                          "name": "inalpha-e1-managed-run-output",
+                          "workflow_run": (
+                              int(WORKFLOW_RUN)
+                              if WORKFLOW_RUN.isdigit()
+                              else WORKFLOW_RUN
+                          ),
+                      },
+                  }
+
+                  output = json.dumps(
+                      result,
+                      indent=2,
+                      default=str,
+                  )
+
+                  print(output)
+
+                  Path(
+                      "../../../inalpha-e1-managed-run-output.json"
+                  ).write_text(
+                      output + "\n",
+                      encoding="utf-8",
+                  )
+
+              finally:
+                  await close_pool()
 
 
           if __name__ == "__main__":
@@ -367,6 +385,7 @@ jobs:
           GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
           set -o pipefail
+
           uv run python /tmp/inalpha_e1_managed_run.py \
             2>&1 | tee ../../../inalpha-e1-managed-run-output.txt
 
