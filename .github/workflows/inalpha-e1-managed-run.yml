@@ -39,7 +39,7 @@ jobs:
       - name: Install migration dependencies
         working-directory: inalpha
         run: |
-          uv sync --directory infra
+          uv sync --directory infra/migrations
 
       - name: Create disposable test database
         env:
@@ -57,7 +57,7 @@ jobs:
         env:
           DATABASE_URL: postgresql+psycopg://quant:devpass@127.0.0.1:5433/inalpha_test
         run: |
-          uv run --directory infra alembic upgrade head
+          uv run --directory infra/migrations alembic upgrade head
 
       - name: Install Evolver dependencies
         working-directory: inalpha/services/evolver
@@ -84,18 +84,16 @@ jobs:
           from inalpha_evolver.runtime.executor import execute_frozen_run
           from inalpha_evolver.storage import candidates, runs, run_queries
           from inalpha_evolver.runtime.frozen_dataset import FrozenDataset
-          from inalpha_evolver.runtime.evaluator import FrozenDatasetEvaluator
-          from inalpha_evolver.runtime.engine_runner import KillableEngineRunner
 
 
           TESTING_GROUND_REVISION = os.environ["TESTING_GROUND_REVISION"]
           INALPHA_REVISION = os.environ["INALPHA_REVISION"]
-
           WORKFLOW_RUN = os.environ.get("GITHUB_RUN_ID", "unknown")
 
 
           class DeterministicMutator:
-              calls = 0
+              def __init__(self):
+                  self.calls = 0
 
               async def mutate(self, source, report, hint):
                   self.calls += 1
@@ -209,7 +207,9 @@ jobs:
                   },
                   "llm_snapshot": llm_snapshot,
                   "llm_config_digest": llm_config_digest,
-                  "llm_credential_grant": "deterministic-test-grant-" + "x" * 120,
+                  "llm_credential_grant": (
+                      "deterministic-test-grant-" + "x" * 120
+                  ),
                   "llm_credential_grant_required": True,
                   "llm_snapshot_required": True,
                   "created_at": datetime.now(timezone.utc),
@@ -261,6 +261,8 @@ jobs:
               assert candidate["fitness"] is not None
               assert candidate["overfitting_risk"] is not None
 
+              evaluation_snapshot = candidate["evaluation_snapshot"]
+
               result = {
                   "run_id": str(run_id),
                   "testing_ground_revision": TESTING_GROUND_REVISION,
@@ -293,14 +295,14 @@ jobs:
                       "count": len(candidate_rows),
                       "outcome": candidate["outcome"],
                       "source_sha256": candidate["source_hash"],
-                      "evaluation_snapshot": candidate["evaluation_snapshot"],
+                      "evaluation_snapshot": evaluation_snapshot,
                       "fitness": candidate["fitness"],
                       "overfitting_risk": candidate["overfitting_risk"],
-                      "validation": candidate["evaluation_snapshot"].get(
-                          "validation"
-                      )
-                      if isinstance(candidate["evaluation_snapshot"], dict)
-                      else None,
+                      "validation": (
+                          evaluation_snapshot.get("validation")
+                          if isinstance(evaluation_snapshot, dict)
+                          else None
+                      ),
                       "mutation_calls": mutator.calls,
                   },
                   "verified_boundaries": [
@@ -328,9 +330,11 @@ jobs:
                   ],
                   "source_artifact": {
                       "name": "inalpha-e1-managed-run-output",
-                      "workflow_run": int(WORKFLOW_RUN)
-                      if WORKFLOW_RUN.isdigit()
-                      else WORKFLOW_RUN,
+                      "workflow_run": (
+                          int(WORKFLOW_RUN)
+                          if WORKFLOW_RUN.isdigit()
+                          else WORKFLOW_RUN
+                      ),
                   },
               }
 
