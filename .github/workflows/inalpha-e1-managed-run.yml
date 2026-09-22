@@ -78,14 +78,19 @@ jobs:
           import os
           from datetime import UTC, datetime, timedelta
           from pathlib import Path
+          from uuid import uuid4
 
+          from inalpha_paper.kernel.identifiers import InstrumentId
+          from inalpha_paper.model.data import Bar
           from inalpha_shared.db import close_pool, get_conn, init_pool
 
           from inalpha_evolver.config import EvolverSettings
-          from inalpha_evolver.governor.seed import SEED_STRATEGY_CODE
+          from inalpha_evolver.data.manifest import (
+              DatasetManifest,
+              FrozenDataset,
+          )
           from inalpha_evolver.runtime.executor import execute_frozen_run
           from inalpha_evolver.storage import candidates, run_queries, runs
-          from inalpha_evolver.data import FrozenDataset
 
 
           TESTING_GROUND_REVISION = os.environ["TESTING_GROUND_REVISION"]
@@ -114,40 +119,112 @@ jobs:
 
 
           def build_dataset() -> FrozenDataset:
-              bars = []
+              instrument = InstrumentId(
+                  symbol="BTCUSDT",
+                  venue="binance",
+              )
 
-              base_ts = 1767438000000
+              start = datetime(
+                  2026,
+                  1,
+                  1,
+                  tzinfo=UTC,
+              )
 
-              for index in range(60):
-                  bars.append(
-                      {
-                          "timestamp": base_ts + index * 60 * 60 * 1000,
-                          "open": 100.0 + index * 0.1,
-                          "high": 100.5 + index * 0.1,
-                          "low": 99.5 + index * 0.1,
-                          "close": 100.2 + index * 0.1,
-                          "volume": 1000.0 + index,
-                      }
+              bars = tuple(
+                  Bar(
+                      instrument_id=instrument,
+                      timeframe="1h",
+                      open=100.0 + index * 0.1,
+                      high=100.5 + index * 0.1,
+                      low=99.5 + index * 0.1,
+                      close=100.2 + index * 0.1,
+                      volume=1000.0 + index,
+                      ts_event=int(
+                          (
+                              start
+                              + timedelta(hours=index)
+                          ).timestamp()
+                          * 1e9
+                      ),
+                      ts_init=int(
+                          (
+                              start
+                              + timedelta(hours=index)
+                          ).timestamp()
+                          * 1e9
+                      ),
                   )
+                  for index in range(60)
+              )
 
               canonical = json.dumps(
-                  bars,
+                  [
+                      {
+                          "timestamp": bar.ts_event,
+                          "open": bar.open,
+                          "high": bar.high,
+                          "low": bar.low,
+                          "close": bar.close,
+                          "volume": bar.volume,
+                      }
+                      for bar in bars
+                  ],
                   sort_keys=True,
                   separators=(",", ":"),
               ).encode("utf-8")
 
-              content_hash = hashlib.sha256(canonical).hexdigest()
+              content_hash = hashlib.sha256(
+                  canonical
+              ).hexdigest()
+
+              latest = start + timedelta(hours=59)
+
+              manifest = DatasetManifest(
+                  venue="binance",
+                  symbol="BTCUSDT",
+                  requested_timeframe="1h",
+                  data_timeframe="1h",
+                  canonical_timeframe="1h",
+                  requested_from=start,
+                  requested_as_of=start + timedelta(hours=60),
+                  effective_from=start,
+                  effective_to=latest,
+                  latest_bar_ts=latest,
+                  cutoff_bar_ts=latest,
+                  freshness_lag_seconds=0,
+                  data_epoch=int(
+                      latest.timestamp() * 1000
+                  ),
+                  bar_count=len(bars),
+                  annualization_periods=8760,
+                  calendar_code=None,
+                  content_sha256=content_hash,
+                  backfill={
+                      "venue": "binance",
+                      "symbol": "BTCUSDT",
+                      "timeframe": "1h",
+                      "bars_fetched": len(bars),
+                      "bars_inserted": len(bars),
+                      "from_ts": start,
+                      "to_ts": start + timedelta(hours=60),
+                  },
+              )
 
               return FrozenDataset(
                   bars=bars,
-                  venue="binance",
-                  symbol="BTCUSDT",
-                  timeframe="1h",
-                  from_ts=bars[0]["timestamp"],
-                  as_of=bars[-1]["timestamp"],
-                  data_epoch=bars[0]["timestamp"],
-                  content_sha256=content_hash,
+                  manifest=manifest,
               )
+
+
+          def build_seed_source() -> str:
+              return """
+          from inalpha_paper.strategy_authoring.types import Strategy
+
+          class StrategyImpl(Strategy):
+              def on_bar(self, ctx):
+                  return None
+          """
 
 
           async def main():
@@ -155,12 +232,11 @@ jobs:
 
               try:
                   dataset = build_dataset()
+                  seed_source = build_seed_source()
                   mutator = DeterministicMutator()
 
-                  owner = __import__("uuid").uuid4()
+                  owner = uuid4()
                   now = datetime.now(UTC)
-
-                  seed_source = SEED_STRATEGY_CODE
 
                   seed_hash = hashlib.sha256(
                       seed_source.encode("utf-8")
@@ -188,11 +264,11 @@ jobs:
                   }
 
                   config = {
-                      "venue": dataset.venue,
-                      "symbol": dataset.symbol,
-                      "timeframe": dataset.timeframe,
-                      "from_ts": now - timedelta(hours=59),
-                      "as_of": now,
+                      "venue": dataset.manifest.venue,
+                      "symbol": dataset.manifest.symbol,
+                      "timeframe": dataset.manifest.requested_timeframe,
+                      "from_ts": dataset.manifest.requested_from,
+                      "as_of": dataset.manifest.requested_as_of,
                       "initial_cash": 10000.0,
                       "fee_rate": 0.001,
                       "validation_split": 0.5,
@@ -207,39 +283,47 @@ jobs:
                           conn,
                           owner_account_id=owner,
                           requested_by_sub="testing-ground-e1",
-                          idempotency_key=f"testing-ground-e1-{WORKFLOW_RUN}",
+                          idempotency_key=(
+                              f"testing-ground-e1-{WORKFLOW_RUN}"
+                          ),
                           request_hash=hashlib.sha256(
-                              f"testing-ground-e1-{WORKFLOW_RUN}".encode()
+                              (
+                                  f"testing-ground-e1-{WORKFLOW_RUN}"
+                              ).encode()
                           ).hexdigest(),
-                          seed_strategy_id="sma_cross_v1",
+                          seed_strategy_id="testing-ground-e1-seed",
                           seed_source=seed_source,
                           seed_hash=seed_hash,
                           budget=1,
                           config=config,
                           llm_snapshot=llm_snapshot,
                           llm_credential_grant=(
-                              "deterministic-test-grant-" + "x" * 120
+                              "deterministic-test-grant-"
+                              + "x" * 120
                           ),
                           queued_at=now,
                       )
 
                   assert created is True
+
                   run_id = row["run_id"]
 
                   async with get_conn() as conn:
-                      claimed = await run_queries.claim_next(conn)
+                      claimed = await run_queries.claim_next(
+                          conn
+                      )
 
                   assert claimed is not None
-                  assert claimed["status"] == "running"
                   assert claimed["run_id"] == run_id
+                  assert claimed["status"] == "running"
 
                   settings = EvolverSettings(
-                      DATABASE_URL=DATABASE_URL,
-                      EVOLVER_JOB_TIMEOUT_S=300,
-                      EVOLVER_JOB_MEM_GB=2,
-                      EVOLVER_RUN_TIMEOUT_S=1200,
-                      EVOLVER_POOL_SIZE=5,
-                      EVOLVER_MAX_RUNNING_RUNS=1,
+                      database_url=DATABASE_URL,
+                      evolver_job_timeout_s=300,
+                      evolver_job_mem_gb=2,
+                      evolver_run_timeout_s=1200,
+                      evolver_pool_size=5,
+                      evolver_max_running_runs=1,
                   )
 
                   await execute_frozen_run(
@@ -260,10 +344,12 @@ jobs:
                   assert final_run["status"] == "completed"
 
                   async with get_conn() as conn:
-                      candidate_rows = await candidates.list_candidates(
-                          conn,
-                          run_id,
-                          owner,
+                      candidate_rows = (
+                          await candidates.list_candidates(
+                              conn,
+                              run_id,
+                              owner,
+                          )
                       )
 
                   assert len(candidate_rows) == 1
@@ -271,54 +357,98 @@ jobs:
                   candidate = candidate_rows[0]
 
                   assert candidate["outcome"] == "succeeded"
-                  assert candidate["evaluation_snapshot"] is not None
+                  assert (
+                      candidate["evaluation_snapshot"]
+                      is not None
+                  )
                   assert candidate["fitness"] is not None
-                  assert candidate["overfitting_risk"] is not None
+                  assert (
+                      candidate["overfitting_risk"]
+                      is not None
+                  )
 
-                  evaluation_snapshot = candidate["evaluation_snapshot"]
+                  evaluation_snapshot = (
+                      candidate["evaluation_snapshot"]
+                  )
 
                   result = {
                       "run_id": str(run_id),
-                      "testing_ground_revision": TESTING_GROUND_REVISION,
+                      "testing_ground_revision": (
+                          TESTING_GROUND_REVISION
+                      ),
                       "inalpha_revision": INALPHA_REVISION,
                       "workflow_run": WORKFLOW_RUN,
                       "status": final_run["status"],
                       "environment": {
                           "execution": "GitHub Actions",
                           "database": "TimescaleDB",
-                          "database_scope": "disposable test database",
+                          "database_scope": (
+                              "disposable test database"
+                          ),
                           "llm_provider_invoked": False,
                       },
                       "dataset": {
                           "type": "synthetic",
-                          "venue": dataset.venue,
-                          "symbol": dataset.symbol,
-                          "timeframe": dataset.timeframe,
-                          "bar_count": len(dataset.bars),
-                          "data_epoch": dataset.data_epoch,
-                          "content_sha256": dataset.content_sha256,
+                          "venue": (
+                              dataset.manifest.venue
+                          ),
+                          "symbol": (
+                              dataset.manifest.symbol
+                          ),
+                          "timeframe": (
+                              dataset.manifest.requested_timeframe
+                          ),
+                          "bar_count": (
+                              dataset.manifest.bar_count
+                          ),
+                          "data_epoch": (
+                              dataset.manifest.data_epoch
+                          ),
+                          "content_sha256": (
+                              dataset.manifest.content_sha256
+                          ),
                       },
                       "seed": {
                           "source_sha256": seed_hash,
-                          "snapshot": final_run["seed_report_snapshot"],
-                          "baseline_snapshot": final_run["baseline_snapshot"],
+                          "snapshot": (
+                              final_run[
+                                  "seed_report_snapshot"
+                              ]
+                          ),
+                          "baseline_snapshot": (
+                              final_run[
+                                  "baseline_snapshot"
+                              ]
+                          ),
                       },
                       "candidate": {
                           "count": len(candidate_rows),
                           "outcome": candidate["outcome"],
-                          "source_sha256": candidate["source_hash"],
-                          "evaluation_snapshot": evaluation_snapshot,
+                          "source_sha256": (
+                              candidate["source_hash"]
+                          ),
+                          "evaluation_snapshot": (
+                              evaluation_snapshot
+                          ),
                           "fitness": candidate["fitness"],
-                          "overfitting_risk": candidate["overfitting_risk"],
+                          "overfitting_risk": (
+                              candidate[
+                                  "overfitting_risk"
+                              ]
+                          ),
                           "validation": (
-                              evaluation_snapshot.get("validation")
+                              evaluation_snapshot.get(
+                                  "validation"
+                              )
                               if isinstance(
                                   evaluation_snapshot,
                                   dict,
                               )
                               else None
                           ),
-                          "mutation_calls": mutator.calls,
+                          "mutation_calls": (
+                              mutator.calls
+                          ),
                       },
                       "verified_boundaries": [
                           "queued run persistence",
@@ -336,15 +466,47 @@ jobs:
                           "real candidate/run finalization",
                       ],
                       "observations": [
-                          "The managed E1 execution path completed successfully.",
-                          "The test crossed the real database queue, candidate persistence, evaluation, and finalization boundaries.",
-                          "The LLM mutation boundary was replaced by a deterministic mutator, so this run does not verify live LLM mutation.",
-                          "The dataset was synthetic, so fitness and overfitting classification are execution evidence rather than evidence of strategy quality.",
-                          "The production DataClient and FrozenBarsLoader path was intentionally bypassed by injecting a controlled FrozenDataset.",
-                          "The preserved dataset hash is computed from the exact synthetic bar fixture used by this run.",
+                          (
+                              "The managed E1 execution path "
+                              "completed successfully."
+                          ),
+                          (
+                              "The test crossed the real "
+                              "database queue, candidate "
+                              "persistence, evaluation, and "
+                              "finalization boundaries."
+                          ),
+                          (
+                              "The LLM mutation boundary was "
+                              "replaced by a deterministic "
+                              "mutator, so this run does not "
+                              "verify live LLM mutation."
+                          ),
+                          (
+                              "The dataset was synthetic, so "
+                              "fitness and overfitting "
+                              "classification are execution "
+                              "evidence rather than evidence "
+                              "of strategy quality."
+                          ),
+                          (
+                              "The production DataClient and "
+                              "FrozenBarsLoader path was "
+                              "intentionally bypassed by "
+                              "injecting a controlled "
+                              "FrozenDataset."
+                          ),
+                          (
+                              "The preserved dataset hash is "
+                              "computed from the exact "
+                              "synthetic bar fixture used by "
+                              "this run."
+                          ),
                       ],
                       "source_artifact": {
-                          "name": "inalpha-e1-managed-run-output",
+                          "name": (
+                              "inalpha-e1-managed-run-output"
+                          ),
                           "workflow_run": (
                               int(WORKFLOW_RUN)
                               if WORKFLOW_RUN.isdigit()
