@@ -80,8 +80,8 @@ jobs:
           from pathlib import Path
           from uuid import uuid4
 
-          from inalpha_paper.kernel.identifiers import InstrumentId
           from inalpha_paper.model.data import Bar
+          from inalpha_paper.kernel.identifiers import InstrumentId
           from inalpha_shared.db import close_pool, get_conn, init_pool
 
           from inalpha_evolver.config import EvolverSettings
@@ -219,8 +219,6 @@ jobs:
 
           def build_seed_source() -> str:
               return """
-          from inalpha_paper.strategy_authoring.types import Strategy
-
           class StrategyImpl(Strategy):
               def on_bar(self, ctx):
                   return None
