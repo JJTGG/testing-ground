@@ -220,8 +220,20 @@ jobs:
           def build_seed_source() -> str:
               return """
           class StrategyImpl(Strategy):
-              def on_bar(self, ctx):
-                  return None
+              def __init__(
+                  self,
+                  name,
+                  clock,
+                  msgbus,
+                  instrument_id,
+                  timeframe="1h",
+              ):
+                  super().__init__(name, clock, msgbus)
+                  self._instrument_id = instrument_id
+                  self._timeframe = timeframe
+
+              def on_bar(self, bar):
+                  pass
           """
 
 
