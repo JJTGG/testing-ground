@@ -89,6 +89,7 @@ jobs:
               DatasetManifest,
               FrozenDataset,
           )
+          from inalpha_evolver.mutator.llm_client import MutationResult
           from inalpha_evolver.runtime.executor import execute_frozen_run
           from inalpha_evolver.storage import candidates, run_queries, runs
 
@@ -106,16 +107,44 @@ jobs:
               async def mutate(self, source, report, hint):
                   self.calls += 1
 
-                  return {
-                      "source": source,
-                      "diff": "",
-                      "usage": {
-                          "input_tokens": 0,
-                          "output_tokens": 0,
-                          "cache_hit_tokens": 0,
-                          "llm_cost_usd": 0.0,
-                      },
-                  }
+                  old = (
+                      "    def on_bar(self, bar):\n"
+                      "        pass\n"
+                  )
+
+                  new = (
+                      "    def on_bar(self, bar):\n"
+                      "        return None\n"
+                  )
+
+                  assert old in source
+
+                  mutated_source = source.replace(
+                      old,
+                      new,
+                      1,
+                  )
+
+                  unified_diff = (
+                      "--- a/strategy.py\n"
+                      "+++ b/strategy.py\n"
+                      "@@ -12,2 +12,2 @@\n"
+                      "     def on_bar(self, bar):\n"
+                      "-        pass\n"
+                      "+        return None\n"
+                  )
+
+                  return MutationResult(
+                      new_source=mutated_source,
+                      unified_diff=unified_diff,
+                      source_hash=hashlib.sha256(
+                          mutated_source.encode("utf-8")
+                      ).hexdigest(),
+                      llm_cost_usd=0.0,
+                      cache_hit_tokens=0,
+                      input_tokens=0,
+                      output_tokens=0,
+                  )
 
 
           def build_dataset() -> FrozenDataset:
