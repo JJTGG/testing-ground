@@ -31,7 +31,9 @@ export type RunResult = {
   run_id: string;
   experiment: string;
   test: string;
-  revision: string;
+  testing_ground_revision?: string;
+  inalpha_revision?: string;
+  revision?: string;
   status: string;
   environment: RunEnvironment;
   dataset: RunDataset;
