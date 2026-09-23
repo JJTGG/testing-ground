@@ -305,3 +305,76 @@ footer {
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
+
+.statement {
+  max-width: 780px;
+}
+
+.statement p {
+  margin: 0;
+  color: #cfcfcf;
+  font-size: 20px;
+  line-height: 1.7;
+}
+
+.statement p + p {
+  margin-top: 28px;
+  color: var(--muted);
+  font-size: 16px;
+}
+
+.statement-large p {
+  color: var(--foreground);
+  font-size: clamp(28px, 5vw, 52px);
+  line-height: 1.12;
+  letter-spacing: -0.04em;
+}
+
+.hero-actions {
+  margin-top: 36px;
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  min-height: 46px;
+  padding: 0 20px;
+  border: 1px solid var(--foreground);
+  color: var(--background);
+  background: var(--foreground);
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.button:hover {
+  color: var(--background);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.section-action {
+  margin-top: 24px;
+}
+
+.text-link {
+  color: var(--foreground);
+  font-size: 14px;
+  text-decoration: none;
+}
+
+.text-link:hover {
+  color: var(--accent);
+}
+
+.no-runs {
+  margin: 18px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+}
