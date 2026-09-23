@@ -35,7 +35,7 @@ export default async function RunPage({
         </div>
       </section>
 
-      <section className="section">
+            <section className="section">
         <p className="section-label">RUN</p>
 
         <div className="detail-grid">
@@ -45,16 +45,36 @@ export default async function RunPage({
           </div>
 
           <div className="detail-card">
-            <span>Revision</span>
-            <strong className="mono">
-              {run.revision}
-            </strong>
-          </div>
-
-          <div className="detail-card">
             <span>Status</span>
             <strong>{run.status}</strong>
           </div>
+
+          {run.testing_ground_revision && (
+            <div className="detail-card">
+              <span>Testing Ground revision</span>
+              <strong className="mono">
+                {run.testing_ground_revision}
+              </strong>
+            </div>
+          )}
+
+          {run.inalpha_revision ? (
+            <div className="detail-card">
+              <span>Inalpha revision</span>
+              <strong className="mono">
+                {run.inalpha_revision}
+              </strong>
+            </div>
+          ) : (
+            run.revision && (
+              <div className="detail-card">
+                <span>Revision</span>
+                <strong className="mono">
+                  {run.revision}
+                </strong>
+              </div>
+            )
+          )}
         </div>
       </section>
 
