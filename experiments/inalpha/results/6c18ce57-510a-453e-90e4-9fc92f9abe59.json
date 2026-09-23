@@ -1,0 +1,225 @@
+{
+  "run_id": "6c18ce57-510a-453e-90e4-9fc92f9abe59",
+  "experiment": "inalpha",
+  "test": "E1 managed execution boundary",
+  "testing_ground_revision": "cfba60a5156bc2375e2bc12dade17cf71c8c6c5a",
+  "inalpha_revision": "3da8b103d61fc3c6af82ea479beade0cd7436e57",
+  "workflow_run": 35772267645,
+  "status": "completed",
+  "environment": {
+    "execution": "GitHub Actions",
+    "database": "TimescaleDB",
+    "database_scope": "disposable test database",
+    "llm_provider_invoked": false
+  },
+  "dataset": {
+    "type": "synthetic",
+    "venue": "binance",
+    "symbol": "BTCUSDT",
+    "timeframe": "1h",
+    "bar_count": 60,
+    "data_epoch": 1767438000000,
+    "content_sha256": "0e02346301b988d467956cadd9b6b0666874d6d6ed8f71b6c5107b7d2e3df07e"
+  },
+  "seed": {
+    "source_sha256": "e175cb409b0020461f7aeb56a372cbf122b8f21561c219c4f49e325151394d63",
+    "snapshot": {
+      "calmar": null,
+      "sharpe": null,
+      "blew_up": false,
+      "fitness": 0.0,
+      "sortino": null,
+      "num_bars": 60,
+      "win_rate": null,
+      "expectancy": null,
+      "num_trades": 0,
+      "period_end": "2026-01-03T11:00:00Z",
+      "total_fees": 0.0,
+      "validation": {
+        "flags": [
+          "insufficient_sample",
+          "sharpe_undefined"
+        ],
+        "train": {
+          "sharpe": null,
+          "num_bars": 30,
+          "num_trades": 0,
+          "max_drawdown_pct": 0.0,
+          "total_return_pct": 0.0
+        },
+        "holdout": {
+          "sharpe": null,
+          "num_bars": 30,
+          "num_trades": 0,
+          "max_drawdown_pct": 0.0,
+          "total_return_pct": 0.0
+        },
+        "decay_ratio": null,
+        "split_ratio": 0.5,
+        "holdout_sharpe_ci_includes_zero": true
+      },
+      "exposure_pct": 0.0,
+      "final_equity": 10000.0,
+      "initial_cash": 10000.0,
+      "payoff_ratio": null,
+      "period_start": "2026-01-01T00:00:00Z",
+      "profit_factor": null,
+      "schema_version": "e1.report.v1",
+      "health_warnings": [],
+      "sharpe_ci_lower": null,
+      "sharpe_ci_upper": null,
+      "max_drawdown_pct": 0.0,
+      "protective_exits": 0,
+      "total_return_pct": 0.0,
+      "annualization_periods": 8760.0,
+      "annualized_return_pct": 0.0,
+      "sharpe_ci_includes_zero": null,
+      "annualized_volatility_pct": 0.0
+    },
+    "baseline_snapshot": {
+      "calmar": null,
+      "sharpe": 5900.4944653224165,
+      "blew_up": false,
+      "fitness": 5900.32779865575,
+      "sortino": null,
+      "num_bars": 60,
+      "win_rate": null,
+      "expectancy": null,
+      "num_trades": 1,
+      "period_end": "2026-01-03T11:00:00Z",
+      "total_fees": 9.514304723885562,
+      "validation": null,
+      "exposure_pct": 98.30508474576271,
+      "final_equity": 10560.773690713811,
+      "initial_cash": 10000.0,
+      "payoff_ratio": null,
+      "period_start": "2026-01-01T00:00:00Z",
+      "profit_factor": null,
+      "schema_version": "e1.report.v1",
+      "health_warnings": [],
+      "sharpe_ci_lower": 86026.29427958773,
+      "sharpe_ci_upper": 108554.06511500306,
+      "max_drawdown_pct": 0.0,
+      "protective_exits": 0,
+      "total_return_pct": 5.607736907138115,
+      "annualization_periods": 8760.0,
+      "annualized_return_pct": 818.7295884421649,
+      "sharpe_ci_includes_zero": false,
+      "annualized_volatility_pct": 0.1373568925790655
+    }
+  },
+  "candidate": {
+    "count": 1,
+    "outcome": "succeeded",
+    "source_sha256": "af68a1e517c2b9c8200f2e2457ccda6ed4c7c125c45ed2d752325729d2ad639a",
+    "evaluation_snapshot": {
+      "calmar": null,
+      "sharpe": null,
+      "blew_up": false,
+      "fitness": 0.0,
+      "sortino": null,
+      "num_bars": 60,
+      "win_rate": null,
+      "expectancy": null,
+      "num_trades": 0,
+      "period_end": "2026-01-03T11:00:00Z",
+      "total_fees": 0.0,
+      "validation": {
+        "flags": [
+          "insufficient_sample",
+          "sharpe_undefined"
+        ],
+        "train": {
+          "sharpe": null,
+          "num_bars": 30,
+          "num_trades": 0,
+          "max_drawdown_pct": 0.0,
+          "total_return_pct": 0.0
+        },
+        "holdout": {
+          "sharpe": null,
+          "num_bars": 30,
+          "num_trades": 0,
+          "max_drawdown_pct": 0.0,
+          "total_return_pct": 0.0
+        },
+        "decay_ratio": null,
+        "split_ratio": 0.5,
+        "holdout_sharpe_ci_includes_zero": true
+      },
+      "exposure_pct": 0.0,
+      "final_equity": 10000.0,
+      "initial_cash": 10000.0,
+      "payoff_ratio": null,
+      "period_start": "2026-01-01T00:00:00Z",
+      "profit_factor": null,
+      "schema_version": "e1.report.v1",
+      "health_warnings": [],
+      "sharpe_ci_lower": null,
+      "sharpe_ci_upper": null,
+      "max_drawdown_pct": 0.0,
+      "protective_exits": 0,
+      "total_return_pct": 0.0,
+      "annualization_periods": 8760.0,
+      "annualized_return_pct": 0.0,
+      "sharpe_ci_includes_zero": null,
+      "annualized_volatility_pct": 0.0
+    },
+    "fitness": 0.0,
+    "overfitting_risk": "high",
+    "validation": {
+      "flags": [
+        "insufficient_sample",
+        "sharpe_undefined"
+      ],
+      "train": {
+        "sharpe": null,
+        "num_bars": 30,
+        "num_trades": 0,
+        "max_drawdown_pct": 0.0,
+        "total_return_pct": 0.0
+      },
+      "holdout": {
+        "sharpe": null,
+        "num_bars": 30,
+        "num_trades": 0,
+        "max_drawdown_pct": 0.0,
+        "total_return_pct": 0.0
+      },
+      "decay_ratio": null,
+      "split_ratio": 0.5,
+      "holdout_sharpe_ci_includes_zero": true
+    },
+    "mutation_calls": 1
+  },
+  "verified_boundaries": [
+    "queued run persistence",
+    "real DB queue claim",
+    "real execute_frozen_run",
+    "real seed evaluation",
+    "real baseline evaluation",
+    "deterministic mutation boundary",
+    "real AST audit",
+    "real candidate persistence",
+    "real candidate worker evaluation",
+    "real fitness",
+    "real validation",
+    "real overfitting-risk classification",
+    "real candidate/run finalization"
+  ],
+  "observations": [
+    "The managed E1 execution path completed successfully.",
+    "The test crossed the real database queue, candidate persistence, evaluation, and finalization boundaries.",
+    "The LLM mutation boundary was replaced by a deterministic mutator, so this run does not verify live LLM mutation.",
+    "The dataset was synthetic, so fitness and overfitting classification are execution evidence rather than evidence of strategy quality.",
+    "The production DataClient and FrozenBarsLoader path was intentionally bypassed by injecting a controlled FrozenDataset.",
+    "The preserved dataset hash is computed from the exact synthetic bar fixture used by this run."
+  ],
+  "source_artifact": {
+    "name": "inalpha-e1-managed-run-output",
+    "artifact_id": 10714582506,
+    "workflow_run": 35772267645,
+    "digest": "sha256:18482baf5d66740f9e0f5b2733983645d4d6cdb6d605335a24f5cb5f764e9b71",
+    "expires_at": "2026-12-21T19:12:23Z"
+  }
+}
