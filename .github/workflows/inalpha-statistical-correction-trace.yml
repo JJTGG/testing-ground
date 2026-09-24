@@ -21,27 +21,20 @@ jobs:
           ref: ${{ env.INALPHA_REVISION }}
           path: inalpha
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
 
       - name: Install paper dependencies
         working-directory: inalpha/services/paper
-        run: |
-          python -m pip install --upgrade pip
-          pip install uv
-          uv sync
+        run: uv sync
 
       - name: Install evolver dependencies
         working-directory: inalpha/services/evolver
-        run: |
-          uv sync
+        run: uv sync
 
       - name: Trace E1 statistical call sites
         working-directory: inalpha
         run: |
-          PYTHONPATH="services/paper/src:services/evolver/src" \
           python - <<'PY'
           from pathlib import Path
 
@@ -95,7 +88,6 @@ jobs:
       - name: Inspect evaluator API
         working-directory: inalpha
         run: |
-          PYTHONPATH="services/paper/src" \
           python - <<'PY'
           import inspect
 
@@ -137,17 +129,10 @@ jobs:
         ports:
           - 5433:5432
         options: >-
-          --health-cmd "pg_isready -U quant -d postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-
-    env:
-      INALPHA_REVISION: 3da8b103d61fc3c6af82ea479beade0cd7436e57
-      DATABASE_URL: postgresql+psycopg://quant:devpass@localhost:5433/inalpha_test
-      POSTGRES_USER: quant
-      POSTGRES_PASSWORD: devpass
-      POSTGRES_DB: inalpha_test
+          --health-cmd="pg_isready -U quant -d postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
 
     steps:
       - name: Checkout Testing Ground
@@ -160,82 +145,589 @@ jobs:
           ref: ${{ env.INALPHA_REVISION }}
           path: inalpha
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
 
-      - name: Wait for TimescaleDB
+      - name: Install migration dependencies
+        working-directory: inalpha
         run: |
-          for i in {1..30}; do
-            pg_isready -h 127.0.0.1 -p 5433 -U quant && exit 0
-            sleep 2
-          done
-          exit 1
+          uv sync --directory infra/migrations
 
-      - name: Install PostgreSQL client
+      - name: Create disposable test database
+        env:
+          PGPASSWORD: devpass
         run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql-client
-
-      - name: Create test database
-        run: |
-          PGPASSWORD="$POSTGRES_PASSWORD" \
           psql \
             -h 127.0.0.1 \
             -p 5433 \
-            -U "$POSTGRES_USER" \
+            -U quant \
             -d postgres \
             -c "CREATE DATABASE inalpha_test;"
 
-      - name: Install evolver dependencies
-        working-directory: inalpha/services/evolver
-        run: |
-          pip install uv
-          uv sync
-
-      - name: Install paper dependencies
-        working-directory: inalpha/services/paper
-        run: |
-          uv sync
-
       - name: Run Inalpha migrations
+        working-directory: inalpha
+        env:
+          DATABASE_URL: postgresql+psycopg://quant:devpass@127.0.0.1:5433/inalpha_test
+        run: |
+          uv run --directory infra/migrations alembic upgrade head
+
+      - name: Install Evolver dependencies
+        working-directory: inalpha/services/evolver
+        env:
+          DATABASE_URL: postgresql+psycopg://quant:devpass@127.0.0.1:5433/inalpha_test
+        run: |
+          uv sync
+
+      - name: Create three-candidate E1 harness
         working-directory: inalpha/services/evolver
         run: |
-          uv run alembic -c alembic.ini upgrade head
+          cat > /tmp/inalpha_e1_statistical_trace.py <<'PY'
+          from __future__ import annotations
 
-      - name: Verify database
-        run: |
-          PGPASSWORD="$POSTGRES_PASSWORD" \
-          psql \
-            -h 127.0.0.1 \
-            -p 5433 \
-            -U "$POSTGRES_USER" \
-            -d "$POSTGRES_DB" \
-            -c "\dt"
+          import asyncio
+          import hashlib
+          import json
+          import os
+          from datetime import UTC, datetime, timedelta
+          from pathlib import Path
+          from uuid import uuid4
 
-      - name: Prepare multi-candidate harness
-        run: |
-          test -f experiments/inalpha/tests/e1_managed_run.py
-          cp experiments/inalpha/tests/e1_managed_run.py \
-             /tmp/e1_managed_run.py
+          from inalpha_paper.kernel.identifiers import InstrumentId
+          from inalpha_paper.model.data import Bar
+          from inalpha_shared.db import close_pool, get_conn, init_pool
 
-      - name: Run managed E1 statistical trace
+          from inalpha_evolver.config import EvolverSettings
+          from inalpha_evolver.data.manifest import DatasetManifest, FrozenDataset
+          from inalpha_evolver.mutator.llm_client import MutationResult
+          from inalpha_evolver.runtime.executor import execute_frozen_run
+          from inalpha_evolver.storage import candidates, run_queries, runs
+
+
+          TESTING_GROUND_REVISION = os.environ["TESTING_GROUND_REVISION"]
+          INALPHA_REVISION = os.environ["INALPHA_REVISION"]
+          WORKFLOW_RUN = os.environ.get("GITHUB_RUN_ID", "unknown")
+          DATABASE_URL = os.environ["DATABASE_URL"]
+
+
+          class DeterministicMutator:
+              def __init__(self):
+                  self.calls = 0
+
+              async def mutate(self, source, report, hint):
+                  self.calls += 1
+
+                  old = (
+                      "    def on_bar(self, bar):\n"
+                      "        pass\n"
+                  )
+
+                  new = (
+                      "    def on_bar(self, bar):\n"
+                      "        return None\n"
+                  )
+
+                  assert old in source
+
+                  mutated_source = source.replace(old, new, 1)
+
+                  unified_diff = (
+                      "--- a/strategy.py\n"
+                      "+++ b/strategy.py\n"
+                      "@@ -12,2 +12,2 @@\n"
+                      "     def on_bar(self, bar):\n"
+                      "-        pass\n"
+                      "+        return None\n"
+                  )
+
+                  return MutationResult(
+                      new_source=mutated_source,
+                      unified_diff=unified_diff,
+                      source_hash=hashlib.sha256(
+                          mutated_source.encode("utf-8")
+                      ).hexdigest(),
+                      llm_cost_usd=0.0,
+                      cache_hit_tokens=0,
+                      input_tokens=0,
+                      output_tokens=0,
+                  )
+
+
+          def build_dataset() -> FrozenDataset:
+              instrument = InstrumentId(
+                  symbol="BTCUSDT",
+                  venue="binance",
+              )
+
+              start = datetime(
+                  2026,
+                  1,
+                  1,
+                  tzinfo=UTC,
+              )
+
+              bars = tuple(
+                  Bar(
+                      instrument_id=instrument,
+                      timeframe="1h",
+                      open=100.0 + index * 0.1,
+                      high=100.5 + index * 0.1,
+                      low=99.5 + index * 0.1,
+                      close=100.2 + index * 0.1,
+                      volume=1000.0 + index,
+                      ts_event=int(
+                          (
+                              start + timedelta(hours=index)
+                          ).timestamp() * 1e9
+                      ),
+                      ts_init=int(
+                          (
+                              start + timedelta(hours=index)
+                          ).timestamp() * 1e9
+                      ),
+                  )
+                  for index in range(60)
+              )
+
+              canonical = json.dumps(
+                  [
+                      {
+                          "timestamp": bar.ts_event,
+                          "open": bar.open,
+                          "high": bar.high,
+                          "low": bar.low,
+                          "close": bar.close,
+                          "volume": bar.volume,
+                      }
+                      for bar in bars
+                  ],
+                  sort_keys=True,
+                  separators=(",", ":"),
+              ).encode("utf-8")
+
+              content_hash = hashlib.sha256(canonical).hexdigest()
+
+              latest = start + timedelta(hours=59)
+
+              manifest = DatasetManifest(
+                  venue="binance",
+                  symbol="BTCUSDT",
+                  requested_timeframe="1h",
+                  data_timeframe="1h",
+                  canonical_timeframe="1h",
+                  requested_from=start,
+                  requested_as_of=start + timedelta(hours=60),
+                  effective_from=start,
+                  effective_to=latest,
+                  latest_bar_ts=latest,
+                  cutoff_bar_ts=latest,
+                  freshness_lag_seconds=0,
+                  data_epoch=int(latest.timestamp() * 1000),
+                  bar_count=len(bars),
+                  annualization_periods=8760,
+                  calendar_code=None,
+                  content_sha256=content_hash,
+                  backfill={
+                      "venue": "binance",
+                      "symbol": "BTCUSDT",
+                      "timeframe": "1h",
+                      "bars_fetched": len(bars),
+                      "bars_inserted": len(bars),
+                      "from_ts": start,
+                      "to_ts": start + timedelta(hours=60),
+                  },
+              )
+
+              return FrozenDataset(
+                  bars=bars,
+                  manifest=manifest,
+              )
+
+
+          def build_seed_source() -> str:
+              return """
+          class StrategyImpl(Strategy):
+              def __init__(
+                  self,
+                  name,
+                  clock,
+                  msgbus,
+                  instrument_id,
+                  timeframe="1h",
+              ):
+                  super().__init__(name, clock, msgbus)
+                  self._instrument_id = instrument_id
+                  self._timeframe = timeframe
+
+              def on_bar(self, bar):
+                  pass
+          """
+
+
+          def statistical_fields(snapshot):
+              if not isinstance(snapshot, dict):
+                  return {}
+
+              interesting = {
+                  "dsr",
+                  "dsr_p_value",
+                  "pbo",
+                  "pbo_probability",
+                  "probability_of_backtest_overfitting",
+                  "n_strategies",
+                  "n_paths",
+                  "n_splits",
+                  "trial_count",
+                  "candidate_count",
+                  "num_candidates",
+                  "search_count",
+                  "n_trials",
+              }
+
+              return {
+                  key: snapshot[key]
+                  for key in interesting
+                  if key in snapshot
+              }
+
+
+          async def main():
+              await init_pool(DATABASE_URL)
+
+              try:
+                  dataset = build_dataset()
+                  seed_source = build_seed_source()
+                  mutator = DeterministicMutator()
+
+                  owner = uuid4()
+                  now = datetime.now(UTC)
+
+                  seed_hash = hashlib.sha256(
+                      seed_source.encode("utf-8")
+                  ).hexdigest()
+
+                  llm_snapshot = {
+                      "config_id": "config-1",
+                      "provider": "deepseek",
+                      "model": "deepseek-flash",
+                      "base_url": "https://api.deepseek.com",
+                      "pricing": {
+                          "version": "provider-estimate-2026-09",
+                          "currency": "USD",
+                          "input_usd_per_million": 0.3,
+                          "output_usd_per_million": 1.2,
+                          "assumed_input_tokens": 24000,
+                          "max_output_tokens": 8192,
+                          "estimated_max_usd_per_candidate": 0.0170304,
+                      },
+                      "config_digest": (
+                          "e6edd79eabdccaed743ac72ddeb8ff4d5de550a742e9e931d368c93caf1cca4c"
+                      ),
+                  }
+
+                  config = {
+                      "venue": dataset.manifest.venue,
+                      "symbol": dataset.manifest.symbol,
+                      "timeframe": dataset.manifest.requested_timeframe,
+                      "from_ts": dataset.manifest.requested_from,
+                      "as_of": dataset.manifest.requested_as_of,
+                      "initial_cash": 10000.0,
+                      "fee_rate": 0.001,
+                      "validation_split": 0.5,
+                      "trading_mode": "spot",
+                      "leverage": 1,
+                      "funding_rate": 0.0,
+                      "params": {},
+                  }
+
+                  async with get_conn() as conn:
+                      row, created = await runs.insert_run(
+                          conn,
+                          owner_account_id=owner,
+                          requested_by_sub="testing-ground-statistical-trace",
+                          idempotency_key=(
+                              f"testing-ground-statistical-trace-{WORKFLOW_RUN}"
+                          ),
+                          request_hash=hashlib.sha256(
+                              (
+                                  f"testing-ground-statistical-trace-{WORKFLOW_RUN}"
+                              ).encode()
+                          ).hexdigest(),
+                          seed_strategy_id="testing-ground-statistical-trace-seed",
+                          seed_source=seed_source,
+                          seed_hash=seed_hash,
+                          budget=3,
+                          config=config,
+                          llm_snapshot=llm_snapshot,
+                          llm_credential_grant=(
+                              "deterministic-test-grant-" + "x" * 120
+                          ),
+                          queued_at=now,
+                      )
+
+                  assert created is True
+
+                  run_id = row["run_id"]
+
+                  async with get_conn() as conn:
+                      claimed = await run_queries.claim_next(conn)
+
+                  assert claimed is not None
+                  assert claimed["run_id"] == run_id
+                  assert claimed["status"] == "running"
+
+                  settings = EvolverSettings(
+                      database_url=DATABASE_URL,
+                      evolver_job_timeout_s=300,
+                      evolver_job_mem_gb=2,
+                      evolver_run_timeout_s=1200,
+                      evolver_pool_size=5,
+                      evolver_max_running_runs=1,
+                  )
+
+                  await execute_frozen_run(
+                      claimed,
+                      dataset=dataset,
+                      mutator=mutator,
+                      settings=settings,
+                  )
+
+                  async with get_conn() as conn:
+                      final_run = await runs.get_run(
+                          conn,
+                          run_id,
+                          owner,
+                      )
+
+                  assert final_run is not None
+                  assert final_run["status"] == "completed"
+
+                  async with get_conn() as conn:
+                      candidate_rows = await candidates.list_candidates(
+                          conn,
+                          run_id,
+                          owner,
+                      )
+
+                  print("\n=== MULTI-CANDIDATE RESULT ===")
+                  print(f"run_id              = {run_id}")
+                  print(f"budget               = 3")
+                  print(f"persisted candidates = {len(candidate_rows)}")
+                  print(f"mutation calls      = {mutator.calls}")
+
+                  assert len(candidate_rows) == 3
+                  assert mutator.calls == 3
+
+                  candidate_results = []
+
+                  for candidate in candidate_rows:
+                      snapshot = candidate["evaluation_snapshot"]
+                      fields = statistical_fields(snapshot)
+
+                      print("\n--- Candidate ---")
+                      print(f"slot                = {candidate['slot']}")
+                      print(f"outcome             = {candidate['outcome']}")
+                      print(f"fitness             = {candidate['fitness']}")
+                      print(
+                          "overfitting_risk    = "
+                          f"{candidate['overfitting_risk']}"
+                      )
+                      print(
+                          "statistical_fields  = "
+                          f"{json.dumps(fields, default=str)}"
+                      )
+
+                      candidate_results.append(
+                          {
+                              "slot": candidate["slot"],
+                              "outcome": candidate["outcome"],
+                              "fitness": candidate["fitness"],
+                              "overfitting_risk": candidate[
+                                  "overfitting_risk"
+                              ],
+                              "statistical_fields": fields,
+                              "evaluation_snapshot": snapshot,
+                          }
+                      )
+
+                  all_snapshots = [
+                      candidate["evaluation_snapshot"]
+                      for candidate in candidate_rows
+                  ]
+
+                  any_evolution_trial_count = any(
+                      any(
+                          key in (snapshot or {})
+                          for key in {
+                              "n_strategies",
+                              "trial_count",
+                              "candidate_count",
+                              "num_candidates",
+                              "search_count",
+                              "n_trials",
+                          }
+                      )
+                      for snapshot in all_snapshots
+                  )
+
+                  any_cv_statistics = any(
+                      any(
+                          key in (snapshot or {})
+                          for key in {
+                              "dsr",
+                              "dsr_p_value",
+                              "pbo",
+                              "pbo_probability",
+                              "probability_of_backtest_overfitting",
+                              "n_paths",
+                              "n_splits",
+                          }
+                      )
+                      for snapshot in all_snapshots
+                  )
+
+                  print("\n=== STATISTICAL TRACE CONCLUSION ===")
+
+                  if any_evolution_trial_count:
+                      print(
+                          "Evolutionary trial-count information "
+                          "appears in candidate evaluation snapshots."
+                      )
+                  else:
+                      print(
+                          "No evolutionary trial-count field was "
+                          "present in the candidate evaluation snapshots."
+                      )
+
+                  if any_cv_statistics:
+                      print(
+                          "CV/DSR/PBO-related fields appeared in "
+                          "candidate evaluation snapshots."
+                      )
+                  else:
+                      print(
+                          "No CV/DSR/PBO-related field appeared in "
+                          "candidate evaluation snapshots."
+                      )
+
+                  result = {
+                      "run_id": str(run_id),
+                      "experiment": "inalpha",
+                      "test": "e1-statistical-correction-trace",
+                      "testing_ground_revision": TESTING_GROUND_REVISION,
+                      "inalpha_revision": INALPHA_REVISION,
+                      "workflow_run": WORKFLOW_RUN,
+                      "status": final_run["status"],
+                      "budget": 3,
+                      "candidate_count": len(candidate_rows),
+                      "mutation_calls": mutator.calls,
+                      "environment": {
+                          "execution": "GitHub Actions",
+                          "database": "TimescaleDB",
+                          "database_scope": "disposable test database",
+                          "llm_provider_invoked": False,
+                      },
+                      "dataset": {
+                          "type": "synthetic",
+                          "venue": dataset.manifest.venue,
+                          "symbol": dataset.manifest.symbol,
+                          "timeframe": dataset.manifest.requested_timeframe,
+                          "bar_count": dataset.manifest.bar_count,
+                          "data_epoch": dataset.manifest.data_epoch,
+                          "content_sha256": dataset.manifest.content_sha256,
+                      },
+                      "candidates": candidate_results,
+                      "statistical_trace": {
+                          "evolutionary_trial_count_observed": (
+                              any_evolution_trial_count
+                          ),
+                          "cv_statistics_observed": any_cv_statistics,
+                      },
+                      "verified_boundaries": [
+                          "queued run persistence",
+                          "real DB queue claim",
+                          "real execute_frozen_run",
+                          "real seed evaluation",
+                          "real baseline evaluation",
+                          "deterministic mutation boundary",
+                          "real AST audit",
+                          "three real candidate persistence operations",
+                          "real candidate worker evaluation",
+                          "real fitness",
+                          "real validation",
+                          "real overfitting-risk classification",
+                          "real candidate/run finalization",
+                      ],
+                      "observations": [
+                          (
+                              "Three candidate slots were requested "
+                              "and three candidates were persisted "
+                              "and evaluated."
+                          ),
+                          (
+                              "The mutation boundary was deterministic "
+                              "and did not invoke an LLM provider."
+                          ),
+                          (
+                              "All three candidates were evaluated "
+                              "through the real E1 candidate evaluation "
+                              "path."
+                          ),
+                          (
+                              "Candidate evaluation snapshots were "
+                              "inspected for evolutionary trial-count "
+                              "and CV/DSR/PBO fields."
+                          ),
+                          (
+                              "Synthetic data limits this experiment "
+                              "to execution and architectural evidence; "
+                              "it is not strategy-quality evidence."
+                          ),
+                      ],
+                  }
+
+                  output = json.dumps(
+                      result,
+                      indent=2,
+                      default=str,
+                  )
+
+                  print("\n=== PRESERVED TRACE OUTPUT ===")
+                  print(output)
+
+                  Path(
+                      "../../../inalpha-e1-statistical-trace-output.json"
+                  ).write_text(
+                      output + "\n",
+                      encoding="utf-8",
+                  )
+
+              finally:
+                  await close_pool()
+
+
+          if __name__ == "__main__":
+              asyncio.run(main())
+          PY
+
+      - name: Run three-candidate managed E1 trace
+        working-directory: inalpha/services/evolver
+        env:
+          DATABASE_URL: postgresql+psycopg://quant:devpass@127.0.0.1:5433/inalpha_test
+          TESTING_GROUND_REVISION: ${{ github.sha }}
+          INALPHA_REVISION: 3da8b103d61fc3c6af82ea479beade0cd7436e57
+          GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
-          echo "=== MULTI-CANDIDATE E1 TRACE ==="
-          echo
-          echo "The managed harness must execute E1 with:"
-          echo "  budget > 1"
-          echo "  deterministic mutation"
-          echo "  controlled FrozenDataset"
-          echo "  real execute_frozen_run()"
-          echo
-          echo "The next harness revision will record:"
-          echo "  candidate count"
-          echo "  candidate evaluation snapshots"
-          echo "  overfitting-risk values"
-          echo "  statistical fields"
-          echo "  CV/DSR/PBO evidence"
-          echo
-          echo "Stopping before claiming runtime statistical invocation."
-          exit 1
+          set -o pipefail
+
+          uv run python /tmp/inalpha_e1_statistical_trace.py \
+            2>&1 | tee ../../../inalpha-e1-statistical-trace-output.txt
+
+      - name: Upload statistical trace output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inalpha-e1-statistical-trace-output
+          path: |
+            inalpha-e1-statistical-trace-output.txt
+            inalpha-e1-statistical-trace-output.json
+          if-no-files-found: warn
