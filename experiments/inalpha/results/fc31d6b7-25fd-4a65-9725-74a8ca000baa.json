@@ -1,0 +1,93 @@
+{
+  "run_id": "fc31d6b7-25fd-4a65-9725-74a8ca000baa",
+  "experiment": "inalpha",
+  "test": "e1-statistical-correction-trace",
+  "testing_ground_revision": "4b6b86ec98e9f919bfa3c980022d3edd5e9b2f1a",
+  "inalpha_revision": "3da8b103d61fc3c6af82ea479beade0cd7436e57",
+  "workflow_run": "36010926292",
+  "status": "completed",
+  "environment": {
+    "execution": "GitHub Actions",
+    "database": "TimescaleDB",
+    "database_scope": "disposable test database",
+    "llm_provider_invoked": false
+  },
+  "dataset": {
+    "type": "synthetic",
+    "venue": "binance",
+    "symbol": "BTCUSDT",
+    "timeframe": "1h",
+    "bar_count": 60,
+    "data_epoch": 1767225600000
+  },
+  "candidates": [
+    {
+      "slot": 0,
+      "outcome": "succeeded",
+      "source_hash": "56478fcb980672ff66845ff863cb6b616b1d35a84be739278d26708fd95210ae",
+      "fitness": 0.0,
+      "overfitting_risk": "high"
+    },
+    {
+      "slot": 1,
+      "outcome": "succeeded",
+      "source_hash": "37f2b2d5dfb6379258cb204de41a557f504b9fd43eba5a24d98f9593ef2d966a",
+      "fitness": 0.0,
+      "overfitting_risk": "high"
+    },
+    {
+      "slot": 2,
+      "outcome": "succeeded",
+      "source_hash": "08dbc035e82e149aec78112545df9f9efd764e55920f2bcb0c625dbfb4c55567",
+      "fitness": 0.0,
+      "overfitting_risk": "high"
+    }
+  ],
+  "statistical_trace": {
+    "candidate_slots_requested": 3,
+    "distinct_candidates_evaluated": 3,
+    "mutation_calls": 3,
+    "evolutionary_trial_count_observed": false,
+    "cv_statistics_observed": false,
+    "evaluator_trial_count_parameters": [],
+    "e1_candidate_evaluation_references": {
+      "run_cv_backtest": false,
+      "deflated_sharpe_ratio": false,
+      "probability_of_backtest_overfitting": false
+    },
+    "separate_statistical_implementation_exists": true
+  },
+  "verified_boundaries": [
+    "queued run persistence",
+    "real DB queue claim",
+    "real execute_frozen_run",
+    "real seed evaluation",
+    "real baseline evaluation",
+    "deterministic mutation boundary",
+    "real AST audit",
+    "three distinct candidate persistence operations",
+    "three real candidate worker evaluations",
+    "real fitness",
+    "real validation",
+    "real overfitting-risk classification",
+    "real candidate/run finalization"
+  ],
+  "observations": [
+    "Three candidate slots were requested and three distinct candidate sources were generated.",
+    "All three distinct candidates reached the real E1 candidate evaluation path and completed successfully.",
+    "The candidate evaluator exposed no parameter for evolutionary trial count, candidate count, search count, or equivalent multiple-testing count.",
+    "No evolutionary trial-count field appeared in any of the three candidate evaluation snapshots.",
+    "No CV, DSR, or PBO-related field appeared in any of the three candidate evaluation snapshots.",
+    "The E1 evolution generation and slot evaluation modules contained no direct references to run_cv_backtest, deflated_sharpe_ratio, probability_of_backtest_overfitting, or evolutionary trial-count parameters.",
+    "The paper backtest module contains separate CV and Deflated Sharpe machinery.",
+    "Therefore this run found no evidence that the E1 evolutionary candidate population is passed into the CV/DSR/PBO machinery at the candidate-evaluation boundary tested.",
+    "This does not establish that Inalpha has no multiple-testing correction elsewhere in its broader research system.",
+    "The deterministic mutation boundary did not invoke an LLM provider.",
+    "The dataset was synthetic, so the run provides execution and architectural evidence rather than strategy-quality or real-market evidence."
+  ],
+  "source": {
+    "workflow_run": "36010926292",
+    "workflow_commit": "4b6b86ec98e9f919bfa3c980022d3edd5e9b2f1a",
+    "inalpha_commit": "3da8b103d61fc3c6af82ea479beade0cd7436e57"
+  }
+}
