@@ -1,106 +1,22 @@
-# Inalpha
+## Statistical correction trace
 
-Experiment #001.
+A managed E1 run was performed with three distinct candidate strategies at:
 
-Inalpha is an open-source quantitative research framework that uses LLMs for research, strategy generation, evaluation, and evolution.
+- Testing Ground revision: `4b6b86ec98e9f919bfa3c980022d3edd5e9b2f1a`
+- Inalpha revision: `3da8b103d61fc3c6af82ea479beade0cd7436e57`
+- GitHub Actions run: `36010926292`
+- Run ID: `fc31d6b7-25fd-4a65-9725-74a8ca000baa`
 
-Testing Ground is not trying to reproduce or replace Inalpha's internal architecture.
+All three candidates reached the real E1 candidate evaluation path.
 
-The purpose of this experiment is to bring Inalpha into a controlled environment and test what actually happens when its documented research and evolution workflow is exercised.
+The candidate evaluator exposed no evolutionary trial-count parameter, and none of the three evaluation snapshots contained evolutionary trial-count, CV, DSR, or PBO fields.
 
-## Questions
+Static inspection also found that the E1 generation, slot, and strategy-evaluation modules do not directly invoke the separate CV/DSR/PBO machinery found in the paper backtest module.
 
-### 1. Can the core workflow execute?
+### Finding
 
-Test the path from:
+At the pinned revision, this experiment found no evidence that the E1 evolutionary candidate population is passed into CV/DSR/PBO correction at the candidate-evaluation boundary tested.
 
-LLM hypothesis → generated strategy → candidate evaluation → statistical analysis → forward evaluation → final selection.
+This does **not** establish that Inalpha lacks multiple-testing correction elsewhere in its broader research system.
 
-Record where the workflow succeeds, fails, or requires manual intervention.
-
-### 2. Does the statistical evaluation behave as expected?
-
-Examine the framework's use of:
-
-- Deflated Sharpe Ratio
-- bootstrap confidence intervals
-- Probability of Backtest Overfitting
-- Combinatorial Purged Cross-Validation
-- multiple-testing correction
-- parameter sensitivity
-- null-IC testing
-- point-in-time data checks
-
-The goal is to verify behavior, not assume correctness from the presence of the statistical methods.
-
-### 3. Does evolution become appropriately more conservative?
-
-Repeated candidate generation creates additional opportunities to find apparently strong strategies by chance.
-
-Test whether increasing the number of candidates/trials is reflected appropriately in the framework's statistical evaluation.
-
-### 4. Can obvious leakage be detected?
-
-Introduce controlled cases where future information could enter a feature or evaluation path.
-
-Determine whether the framework detects or prevents the leakage.
-
-### 5. Does the holdout remain genuinely isolated?
-
-Verify that the sealed holdout is not exposed during candidate generation, evolution, or intermediate selection.
-
-### 6. What does the sandbox actually protect?
-
-Determine the practical isolation boundary of the execution mechanisms used by Inalpha.
-
-Do not treat a subprocess boundary as equivalent to hardened container or VM isolation without evidence.
-
-## Baseline
-
-Before testing evolutionary behavior, establish a simple baseline strategy.
-
-The baseline should provide a reference point for:
-
-- execution
-- backtesting
-- evaluation
-- statistical reporting
-- reproducibility
-
-## Evidence
-
-Each meaningful run should preserve:
-
-- Inalpha revision
-- test definition
-- execution environment
-- inputs or dataset identifiers where available
-- output
-- errors
-- relevant statistical results
-- observations
-- manual interventions
-
-Results should remain tied to the exact revision that produced them.
-
-## Boundary
-
-Testing Ground owns the experiment record and evidence.
-
-Inalpha owns its internal:
-
-- evaluator
-- backtesting engine
-- strategy execution
-- evolution logic
-- sandbox implementation
-
-Testing Ground should observe and test these systems rather than reimplement them.
-
-## Status
-
-Active.
-
-The first objective is not to prove that Inalpha works.
-
-It is to find out what actually happens when we run it.
+See the preserved run result for the complete evidence record.
