@@ -86,9 +86,9 @@ jobs:
           PY
 
       - name: Inspect evaluator API
-        working-directory: inalpha
+        working-directory: inalpha/services/paper
         run: |
-          python - <<'PY'
+          uv run python - <<'PY'
           import inspect
 
           from inalpha_paper.strategy_evaluation import evaluate_strategy_source
@@ -173,8 +173,6 @@ jobs:
 
       - name: Install Evolver dependencies
         working-directory: inalpha/services/evolver
-        env:
-          DATABASE_URL: postgresql+psycopg://quant:devpass@127.0.0.1:5433/inalpha_test
         run: |
           uv sync
 
@@ -215,28 +213,30 @@ jobs:
 
               async def mutate(self, source, report, hint):
                   self.calls += 1
+                  variant = self.calls
 
-                  old = (
-                      "    def on_bar(self, bar):\n"
-                      "        pass\n"
+                  marker = "class StrategyImpl(Strategy):\n"
+
+                  replacement = (
+                      "class StrategyImpl(Strategy):\n"
+                      f"    TRACE_VARIANT = {variant}\n"
                   )
 
-                  new = (
-                      "    def on_bar(self, bar):\n"
-                      "        return None\n"
+                  assert source.count(marker) == 1
+
+                  mutated_source = source.replace(
+                      marker,
+                      replacement,
+                      1,
                   )
-
-                  assert old in source
-
-                  mutated_source = source.replace(old, new, 1)
 
                   unified_diff = (
                       "--- a/strategy.py\n"
                       "+++ b/strategy.py\n"
-                      "@@ -12,2 +12,2 @@\n"
-                      "     def on_bar(self, bar):\n"
-                      "-        pass\n"
-                      "+        return None\n"
+                      "@@ -1,1 +1,2 @@\n"
+                      "-class StrategyImpl(Strategy):\n"
+                      "+class StrategyImpl(Strategy):\n"
+                      f"+    TRACE_VARIANT = {variant}\n"
                   )
 
                   return MutationResult(
@@ -304,7 +304,9 @@ jobs:
                   separators=(",", ":"),
               ).encode("utf-8")
 
-              content_hash = hashlib.sha256(canonical).hexdigest()
+              content_hash = hashlib.sha256(
+                  canonical
+              ).hexdigest()
 
               latest = start + timedelta(hours=59)
 
@@ -439,27 +441,34 @@ jobs:
                       "params": {},
                   }
 
+                  idempotency_key = (
+                      f"testing-ground-statistical-trace-{WORKFLOW_RUN}"
+                  )
+
+                  request_hash = hashlib.sha256(
+                      idempotency_key.encode()
+                  ).hexdigest()
+
                   async with get_conn() as conn:
                       row, created = await runs.insert_run(
                           conn,
                           owner_account_id=owner,
-                          requested_by_sub="testing-ground-statistical-trace",
-                          idempotency_key=(
-                              f"testing-ground-statistical-trace-{WORKFLOW_RUN}"
+                          requested_by_sub=(
+                              "testing-ground-statistical-trace"
                           ),
-                          request_hash=hashlib.sha256(
-                              (
-                                  f"testing-ground-statistical-trace-{WORKFLOW_RUN}"
-                              ).encode()
-                          ).hexdigest(),
-                          seed_strategy_id="testing-ground-statistical-trace-seed",
+                          idempotency_key=idempotency_key,
+                          request_hash=request_hash,
+                          seed_strategy_id=(
+                              "testing-ground-statistical-trace-seed"
+                          ),
                           seed_source=seed_source,
                           seed_hash=seed_hash,
                           budget=3,
                           config=config,
                           llm_snapshot=llm_snapshot,
                           llm_credential_grant=(
-                              "deterministic-test-grant-" + "x" * 120
+                              "deterministic-test-grant-"
+                              + "x" * 120
                           ),
                           queued_at=now,
                       )
@@ -510,12 +519,33 @@ jobs:
 
                   print("\n=== MULTI-CANDIDATE RESULT ===")
                   print(f"run_id              = {run_id}")
-                  print(f"budget               = 3")
-                  print(f"persisted candidates = {len(candidate_rows)}")
-                  print(f"mutation calls      = {mutator.calls}")
+                  print("budget               = 3")
+                  print(
+                      "persisted candidates = "
+                      f"{len(candidate_rows)}"
+                  )
+                  print(
+                      "mutation calls       = "
+                      f"{mutator.calls}"
+                  )
 
                   assert len(candidate_rows) == 3
                   assert mutator.calls == 3
+
+                  source_hashes = [
+                      candidate["source_hash"]
+                      for candidate in candidate_rows
+                  ]
+
+                  print(
+                      "source hashes        = "
+                      f"{source_hashes}"
+                  )
+
+                  assert len(set(source_hashes)) == 3, (
+                      "Expected three distinct candidate sources, "
+                      f"got {source_hashes}"
+                  )
 
                   candidate_results = []
 
@@ -524,9 +554,18 @@ jobs:
                       fields = statistical_fields(snapshot)
 
                       print("\n--- Candidate ---")
-                      print(f"slot                = {candidate['slot']}")
-                      print(f"outcome             = {candidate['outcome']}")
-                      print(f"fitness             = {candidate['fitness']}")
+                      print(
+                          f"slot                = "
+                          f"{candidate['slot']}"
+                      )
+                      print(
+                          f"outcome             = "
+                          f"{candidate['outcome']}"
+                      )
+                      print(
+                          f"fitness             = "
+                          f"{candidate['fitness']}"
+                      )
                       print(
                           "overfitting_risk    = "
                           f"{candidate['overfitting_risk']}"
@@ -536,10 +575,14 @@ jobs:
                           f"{json.dumps(fields, default=str)}"
                       )
 
+                      assert candidate["outcome"] == "succeeded"
+                      assert snapshot is not None
+
                       candidate_results.append(
                           {
                               "slot": candidate["slot"],
                               "outcome": candidate["outcome"],
+                              "source_hash": candidate["source_hash"],
                               "fitness": candidate["fitness"],
                               "overfitting_risk": candidate[
                                   "overfitting_risk"
@@ -595,7 +638,8 @@ jobs:
                   else:
                       print(
                           "No evolutionary trial-count field was "
-                          "present in the candidate evaluation snapshots."
+                          "present in the candidate evaluation "
+                          "snapshots."
                       )
 
                   if any_cv_statistics:
@@ -612,35 +656,48 @@ jobs:
                   result = {
                       "run_id": str(run_id),
                       "experiment": "inalpha",
-                      "test": "e1-statistical-correction-trace",
-                      "testing_ground_revision": TESTING_GROUND_REVISION,
+                      "test": (
+                          "e1-statistical-correction-trace"
+                      ),
+                      "testing_ground_revision": (
+                          TESTING_GROUND_REVISION
+                      ),
                       "inalpha_revision": INALPHA_REVISION,
                       "workflow_run": WORKFLOW_RUN,
                       "status": final_run["status"],
                       "budget": 3,
                       "candidate_count": len(candidate_rows),
                       "mutation_calls": mutator.calls,
+                      "source_hashes": source_hashes,
                       "environment": {
                           "execution": "GitHub Actions",
                           "database": "TimescaleDB",
-                          "database_scope": "disposable test database",
+                          "database_scope": (
+                              "disposable test database"
+                          ),
                           "llm_provider_invoked": False,
                       },
                       "dataset": {
                           "type": "synthetic",
                           "venue": dataset.manifest.venue,
                           "symbol": dataset.manifest.symbol,
-                          "timeframe": dataset.manifest.requested_timeframe,
+                          "timeframe": (
+                              dataset.manifest.requested_timeframe
+                          ),
                           "bar_count": dataset.manifest.bar_count,
                           "data_epoch": dataset.manifest.data_epoch,
-                          "content_sha256": dataset.manifest.content_sha256,
+                          "content_sha256": (
+                              dataset.manifest.content_sha256
+                          ),
                       },
                       "candidates": candidate_results,
                       "statistical_trace": {
                           "evolutionary_trial_count_observed": (
                               any_evolution_trial_count
                           ),
-                          "cv_statistics_observed": any_cv_statistics,
+                          "cv_statistics_observed": (
+                              any_cv_statistics
+                          ),
                       },
                       "verified_boundaries": [
                           "queued run persistence",
@@ -650,8 +707,8 @@ jobs:
                           "real baseline evaluation",
                           "deterministic mutation boundary",
                           "real AST audit",
-                          "three real candidate persistence operations",
-                          "real candidate worker evaluation",
+                          "three distinct candidate persistence operations",
+                          "three real candidate worker evaluations",
                           "real fitness",
                           "real validation",
                           "real overfitting-risk classification",
@@ -660,17 +717,17 @@ jobs:
                       "observations": [
                           (
                               "Three candidate slots were requested "
-                              "and three candidates were persisted "
-                              "and evaluated."
+                              "and three distinct candidates were "
+                              "persisted."
                           ),
                           (
-                              "The mutation boundary was deterministic "
-                              "and did not invoke an LLM provider."
+                              "All three distinct candidates reached "
+                              "the real E1 candidate evaluation path."
                           ),
                           (
-                              "All three candidates were evaluated "
-                              "through the real E1 candidate evaluation "
-                              "path."
+                              "The mutation boundary was "
+                              "deterministic and did not invoke an "
+                              "LLM provider."
                           ),
                           (
                               "Candidate evaluation snapshots were "
@@ -679,8 +736,9 @@ jobs:
                           ),
                           (
                               "Synthetic data limits this experiment "
-                              "to execution and architectural evidence; "
-                              "it is not strategy-quality evidence."
+                              "to execution and architectural "
+                              "evidence; it is not strategy-quality "
+                              "evidence."
                           ),
                       ],
                   }
