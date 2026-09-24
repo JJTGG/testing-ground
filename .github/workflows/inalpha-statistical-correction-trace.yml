@@ -3,8 +3,128 @@ name: Inalpha E1 Statistical Correction Trace
 on:
   workflow_dispatch:
 
+env:
+  INALPHA_REVISION: 3da8b103d61fc3c6af82ea479beade0cd7436e57
+
 jobs:
-  trace:
+  static-trace:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Testing Ground
+        uses: actions/checkout@v4
+
+      - name: Checkout Inalpha
+        uses: actions/checkout@v4
+        with:
+          repository: mirror29/inalpha
+          ref: ${{ env.INALPHA_REVISION }}
+          path: inalpha
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install paper dependencies
+        working-directory: inalpha/services/paper
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv
+          uv sync
+
+      - name: Install evolver dependencies
+        working-directory: inalpha/services/evolver
+        run: |
+          uv sync
+
+      - name: Trace E1 statistical call sites
+        working-directory: inalpha
+        run: |
+          PYTHONPATH="services/paper/src:services/evolver/src" \
+          python - <<'PY'
+          from pathlib import Path
+
+          targets = {
+              "generation.py":
+                  Path("services/evolver/src/inalpha_evolver/runtime/generation.py"),
+              "slots.py":
+                  Path("services/evolver/src/inalpha_evolver/runtime/slots.py"),
+              "strategy_evaluation.py":
+                  Path("services/paper/src/inalpha_paper/strategy_evaluation.py"),
+              "backtest.py":
+                  Path("services/paper/src/inalpha_paper/engine/backtest.py"),
+          }
+
+          needles = [
+              "run_cv_backtest",
+              "probability_of_backtest_overfitting",
+              "deflated_sharpe_ratio",
+              "n_strategies",
+              "trial_count",
+              "candidate_count",
+              "num_candidates",
+              "search_count",
+              "n_trials",
+          ]
+
+          print("=== E1 STATISTICAL CORRECTION TRACE ===")
+
+          for name, path in targets.items():
+              source = path.read_text()
+
+              print(f"\n--- {name} ---")
+
+              for needle in needles:
+                  matches = [
+                      (i + 1, line.strip())
+                      for i, line in enumerate(source.splitlines())
+                      if needle in line
+                  ]
+
+                  if matches:
+                      print(f"{needle}:")
+                      for line_no, line in matches:
+                          print(f"  {line_no}: {line}")
+                  else:
+                      print(f"{needle}: NONE")
+
+          print("\nStatic trace complete.")
+          PY
+
+      - name: Inspect evaluator API
+        working-directory: inalpha
+        run: |
+          PYTHONPATH="services/paper/src" \
+          python - <<'PY'
+          import inspect
+
+          from inalpha_paper.strategy_evaluation import evaluate_strategy_source
+
+          signature = inspect.signature(evaluate_strategy_source)
+
+          print("=== evaluate_strategy_source ===")
+          print(signature)
+
+          forbidden = {
+              "n_strategies",
+              "trial_count",
+              "candidate_count",
+              "num_candidates",
+              "search_count",
+              "n_trials",
+          }
+
+          exposed = sorted(
+              forbidden.intersection(signature.parameters)
+          )
+
+          print()
+          print("Evolutionary trial-count parameters:")
+          print(exposed if exposed else "NONE")
+          PY
+
+  managed-trace:
     runs-on: ubuntu-latest
 
     services:
@@ -61,123 +181,61 @@ jobs:
       - name: Create test database
         run: |
           PGPASSWORD="$POSTGRES_PASSWORD" \
-            psql \
+          psql \
             -h 127.0.0.1 \
             -p 5433 \
             -U "$POSTGRES_USER" \
             -d postgres \
             -c "CREATE DATABASE inalpha_test;"
 
-      - name: Install paper dependencies
-        working-directory: inalpha/services/paper
-        run: |
-          python -m pip install --upgrade pip
-          pip install uv
-          uv sync
-
       - name: Install evolver dependencies
         working-directory: inalpha/services/evolver
         run: |
+          pip install uv
           uv sync
 
-      - name: Run migrations
-        working-directory: inalpha
+      - name: Install paper dependencies
+        working-directory: inalpha/services/paper
         run: |
-          cd services/evolver
-          uv run alembic upgrade head
+          uv sync
 
-      - name: Static trace of E1 statistical call sites
-        working-directory: inalpha
+      - name: Run Inalpha migrations
+        working-directory: inalpha/services/evolver
         run: |
-          python - <<'PY'
-          from pathlib import Path
+          uv run alembic -c alembic.ini upgrade head
 
-          files = {
-              "generation.py":
-                  Path("services/evolver/src/inalpha_evolver/runtime/generation.py"),
-              "slots.py":
-                  Path("services/evolver/src/inalpha_evolver/runtime/slots.py"),
-              "strategy_evaluation.py":
-                  Path("services/paper/src/inalpha_paper/strategy_evaluation.py"),
-              "backtest.py":
-                  Path("services/paper/src/inalpha_paper/engine/backtest.py"),
-          }
-
-          needles = [
-              "run_cv_backtest",
-              "probability_of_backtest_overfitting",
-              "deflated_sharpe_ratio",
-              "n_strategies",
-              "trial_count",
-              "candidate_count",
-              "num_candidates",
-              "search_count",
-              "n_trials",
-          ]
-
-          print("=== Static Statistical Correction Trace ===")
-
-          for name, path in files.items():
-              text = path.read_text()
-              print(f"\n--- {name} ---")
-
-              for needle in needles:
-                  matches = [
-                      line.strip()
-                      for line in text.splitlines()
-                      if needle in line
-                  ]
-
-                  if matches:
-                      print(f"{needle}:")
-                      for line in matches:
-                          print(f"  {line}")
-                  else:
-                      print(f"{needle}: NONE")
-
-          print("\nStatic inspection complete.")
-          PY
-
-      - name: Inspect E1 evaluator signature
-        working-directory: inalpha
+      - name: Verify database
         run: |
-          PYTHONPATH=services/paper/src \
-          python - <<'PY'
-          import inspect
-          from inalpha_paper.strategy_evaluation import evaluate_strategy_source
+          PGPASSWORD="$POSTGRES_PASSWORD" \
+          psql \
+            -h 127.0.0.1 \
+            -p 5433 \
+            -U "$POSTGRES_USER" \
+            -d "$POSTGRES_DB" \
+            -c "\dt"
 
-          print("=== evaluate_strategy_source signature ===")
-          print(inspect.signature(evaluate_strategy_source))
-
-          signature = inspect.signature(evaluate_strategy_source)
-
-          forbidden = {
-              "n_strategies",
-              "trial_count",
-              "candidate_count",
-              "num_candidates",
-              "search_count",
-              "n_trials",
-          }
-
-          exposed = sorted(forbidden.intersection(signature.parameters))
-
-          print()
-          print("Evolutionary trial-count parameters exposed:")
-          print(exposed if exposed else "NONE")
-          PY
-
-      - name: Run multi-candidate E1 managed trace
-        working-directory: testing-ground
+      - name: Prepare multi-candidate harness
         run: |
-          echo "Managed multi-candidate E1 execution trace placeholder."
-          echo "The real harness must:"
-          echo "1. create one managed run with budget > 1"
-          echo "2. use the deterministic mutator"
-          echo "3. use the controlled FrozenDataset"
-          echo "4. execute real execute_frozen_run()"
-          echo "5. preserve all candidate snapshots"
-          echo "6. record whether CV/DSR/PBO paths are invoked"
+          test -f experiments/inalpha/tests/e1_managed_run.py
+          cp experiments/inalpha/tests/e1_managed_run.py \
+             /tmp/e1_managed_run.py
+
+      - name: Run managed E1 statistical trace
+        run: |
+          echo "=== MULTI-CANDIDATE E1 TRACE ==="
           echo
-          echo "This workflow intentionally fails until the harness is added."
+          echo "The managed harness must execute E1 with:"
+          echo "  budget > 1"
+          echo "  deterministic mutation"
+          echo "  controlled FrozenDataset"
+          echo "  real execute_frozen_run()"
+          echo
+          echo "The next harness revision will record:"
+          echo "  candidate count"
+          echo "  candidate evaluation snapshots"
+          echo "  overfitting-risk values"
+          echo "  statistical fields"
+          echo "  CV/DSR/PBO evidence"
+          echo
+          echo "Stopping before claiming runtime statistical invocation."
           exit 1
