@@ -42,7 +42,6 @@ jobs:
           import hashlib
           import inspect
           import json
-          import sys
           from dataclasses import dataclass
           from datetime import UTC, datetime, timedelta
 
@@ -135,10 +134,18 @@ jobs:
                   ),
               )
 
-              return FrozenDataset(bars=bars, manifest=manifest)
+              return FrozenDataset(
+                  bars=bars,
+                  manifest=manifest,
+              )
 
 
-          def assert_bar_range(label: str, bars, expected_start: int, expected_end: int):
+          def assert_bar_range(
+              label: str,
+              bars,
+              expected_start: int,
+              expected_end: int,
+          ):
               indices = [
                   int(round(bar.close - 100.5))
                   for bar in bars
@@ -177,52 +184,99 @@ jobs:
               print()
 
               print("=== BOUNDARIES ===")
-              print(f"search range           = {search_indices[0]}..{search_indices[-1]}")
-              print(f"validation range       = {validation_indices[0]}..{validation_indices[-1]}")
-              print(f"holdout range          = {holdout_indices[0]}..{holdout_indices[-1]}")
+              print(
+                  f"search range           = "
+                  f"{search_indices[0]}..{search_indices[-1]}"
+              )
+              print(
+                  f"validation range       = "
+                  f"{validation_indices[0]}..{validation_indices[-1]}"
+              )
+              print(
+                  f"holdout range          = "
+                  f"{holdout_indices[0]}..{holdout_indices[-1]}"
+              )
               print()
 
-              assert_bar_range("search dataset", search_dataset.bars, 0, 80)
-              assert_bar_range("generation validation", validation_bars, 60, 80)
+              assert_bar_range(
+                  "search dataset",
+                  search_dataset.bars,
+                  0,
+                  80,
+              )
+
+              assert_bar_range(
+                  "generation validation",
+                  validation_bars,
+                  60,
+                  80,
+              )
 
               overlap = set(search_indices) & set(holdout_indices)
 
               assert not overlap, (
-                  f"sealed holdout leaked into search dataset: {sorted(overlap)}"
+                  "sealed holdout leaked into search dataset: "
+                  f"{sorted(overlap)}"
               )
 
               assert max(search_indices) < min(holdout_indices)
+
               assert min(validation_indices) >= 60
               assert max(validation_indices) < 80
 
               source = inspect.getsource(evaluate_sealed_holdout)
 
               assert "validation_split=0.8" in source, (
-                  "sealed holdout evaluator no longer contains the expected 0.8 split"
+                  "sealed holdout evaluator no longer contains "
+                  "the expected 0.8 split"
               )
 
-              assert "holdout_bars = list(dataset.bars[split_index:])" in source, (
-                  "sealed holdout evaluator no longer explicitly extracts the final segment"
+              assert (
+                  "holdout_bars = list(dataset.bars[split_index:])"
+                  in source
+              ), (
+                  "sealed holdout evaluator no longer explicitly "
+                  "extracts the final segment"
               )
 
               assert "locked champion once" in source, (
-                  "sealed holdout function no longer documents champion-only evaluation"
+                  "sealed holdout function no longer documents "
+                  "champion-only evaluation"
               )
 
               print("=== ASSERTIONS ===")
               print("PASS search dataset contains bars 0..79")
-              print("PASS generation validation contains bars 60..79")
+              print(
+                  "PASS generation validation contains bars 60..79"
+              )
               print("PASS sealed holdout is bars 80..99")
-              print("PASS search dataset contains no sealed-holdout bars")
-              print("PASS generation validation remains inside search surface")
-              print("PASS sealed holdout evaluator uses validation_split=0.8")
-              print("PASS sealed holdout evaluator extracts final dataset segment")
-              print("PASS sealed holdout is evaluated for the locked champion")
+              print(
+                  "PASS search dataset contains no sealed-holdout bars"
+              )
+              print(
+                  "PASS generation validation remains inside "
+                  "search surface"
+              )
+              print(
+                  "PASS sealed holdout evaluator uses "
+                  "validation_split=0.8"
+              )
+              print(
+                  "PASS sealed holdout evaluator extracts "
+                  "final dataset segment"
+              )
+              print(
+                  "PASS sealed holdout is evaluated for "
+                  "the locked champion"
+              )
               print()
 
               result = {
                   "status": "completed",
                   "test": "e2-holdout-isolation",
+                  "inalpha_revision": (
+                      "3da8b103d61fc3c6af82ea479beade0cd7436e57"
+                  ),
                   "dataset": {
                       "type": "synthetic",
                       "bar_count": 100,
@@ -252,19 +306,52 @@ jobs:
                       "locked_champion_only": True,
                   },
                   "observations": [
-                      "E2 explicitly creates a search dataset containing the first 80% of the frozen bars.",
-                      "Generation validation occupies the 60%-80% segment and is available to generation scoring.",
-                      "The final 20% is absent from the search dataset.",
-                      "The sealed-holdout evaluator reconstructs the immutable campaign dataset and evaluates the final 20% using validation_split=0.8.",
-                      "The source boundary supports an explicit separation between generation search/validation and the final sealed holdout.",
-                      "This audit verifies the data-boundary implementation; it does not establish that every possible external dependency or future code path is incapable of leaking holdout information."
+                      (
+                          "E2 explicitly creates a search dataset "
+                          "containing the first 80% of the frozen bars."
+                      ),
+                      (
+                          "Generation validation occupies the "
+                          "60%-80% segment and is available to "
+                          "generation scoring."
+                      ),
+                      (
+                          "The final 20% is absent from the "
+                          "search dataset."
+                      ),
+                      (
+                          "The sealed-holdout evaluator reconstructs "
+                          "the immutable campaign dataset and "
+                          "evaluates the final 20% using "
+                          "validation_split=0.8."
+                      ),
+                      (
+                          "The source boundary supports an explicit "
+                          "separation between generation "
+                          "search/validation and the final "
+                          "sealed holdout."
+                      ),
+                      (
+                          "This audit verifies the data-boundary "
+                          "implementation; it does not establish "
+                          "that every possible external dependency "
+                          "or future code path is incapable of "
+                          "leaking holdout information."
+                      ),
                   ],
               }
 
-              with open("holdout-isolation-result.json", "w", encoding="utf-8") as handle:
+              with open(
+                  "holdout-isolation-result.json",
+                  "w",
+                  encoding="utf-8",
+              ) as handle:
                   json.dump(result, handle, indent=2)
 
-              print("RESULT: E2 sealed holdout is structurally isolated from the generation search dataset.")
+              print(
+                  "RESULT: E2 sealed holdout is structurally "
+                  "isolated from the generation search dataset."
+              )
 
 
           if __name__ == "__main__":
@@ -272,11 +359,12 @@ jobs:
           PY
 
           cd /tmp/inalpha
-          uv run --directory services/evolver python /tmp/holdout_isolation_audit.py
+          uv run --directory services/evolver \
+            python /tmp/holdout_isolation_audit.py
 
       - name: Copy result into Testing Ground workspace
         run: |
-          cp /tmp/inalpha/holdout-isolation-result.json \
+          cp /tmp/inalpha/services/evolver/holdout-isolation-result.json \
             experiments/inalpha/results/e2-holdout-isolation-${GITHUB_RUN_ID}.json
 
       - name: Upload audit result
@@ -284,5 +372,5 @@ jobs:
         with:
           name: inalpha-e2-holdout-isolation
           path: |
-            /tmp/inalpha/holdout-isolation-result.json
+            /tmp/inalpha/services/evolver/holdout-isolation-result.json
             experiments/inalpha/results/e2-holdout-isolation-${{ github.run_id }}.json
