@@ -1,0 +1,41 @@
+{
+  "status": "completed",
+  "test": "e2-holdout-isolation",
+  "inalpha_revision": "3da8b103d61fc3c6af82ea479beade0cd7436e57",
+  "dataset": {
+    "type": "synthetic",
+    "bar_count": 100
+  },
+  "split": {
+    "search": {
+      "start_index": 0,
+      "end_index_exclusive": 80,
+      "bar_count": 80
+    },
+    "generation_validation": {
+      "start_index": 60,
+      "end_index_exclusive": 80,
+      "bar_count": 20
+    },
+    "sealed_holdout": {
+      "start_index": 80,
+      "end_index_exclusive": 100,
+      "bar_count": 20
+    }
+  },
+  "verified": {
+    "search_excludes_holdout": true,
+    "validation_inside_search_surface": true,
+    "sealed_holdout_boundary": true,
+    "sealed_holdout_uses_0_8_split": true,
+    "locked_champion_only": true
+  },
+  "observations": [
+    "E2 explicitly creates a search dataset containing the first 80% of the frozen bars.",
+    "Generation validation occupies the 60%-80% segment and is available to generation scoring.",
+    "The final 20% is absent from the search dataset.",
+    "The sealed-holdout evaluator reconstructs the immutable campaign dataset and evaluates the final 20% using validation_split=0.8.",
+    "The source boundary supports an explicit separation between generation search/validation and the final sealed holdout.",
+    "This audit verifies the data-boundary implementation; it does not establish that every possible external dependency or future code path is incapable of leaking holdout information."
+  ]
+}
