@@ -18,6 +18,9 @@ export default async function RunPage({
     notFound();
   }
 
+  const candidates = run.candidates ?? [];
+  const statisticalTrace = run.statistical_trace;
+
   return (
     <main>
       <section className="hero">
@@ -35,7 +38,7 @@ export default async function RunPage({
         </div>
       </section>
 
-            <section className="section">
+      <section className="section">
         <p className="section-label">RUN</p>
 
         <div className="detail-grid">
@@ -94,9 +97,7 @@ export default async function RunPage({
 
           <div className="detail-card">
             <span>Database scope</span>
-            <strong>
-              {run.environment.database_scope}
-            </strong>
+            <strong>{run.environment.database_scope}</strong>
           </div>
 
           <div className="detail-card">
@@ -146,38 +147,175 @@ export default async function RunPage({
         </div>
       </section>
 
-      <section className="section">
-        <p className="section-label">CANDIDATE</p>
+      {candidates.length > 0 ? (
+        <section className="section">
+          <p className="section-label">CANDIDATES</p>
 
-        <div className="detail-grid">
-          <div className="detail-card">
-            <span>Count</span>
-            <strong>{run.candidate.count}</strong>
+          <div className="observation-list">
+            {candidates.map((candidate) => (
+              <article key={candidate.slot}>
+                <div className="detail-grid">
+                  <div className="detail-card">
+                    <span>Slot</span>
+                    <strong>{candidate.slot}</strong>
+                  </div>
+
+                  <div className="detail-card">
+                    <span>Outcome</span>
+                    <strong>{candidate.outcome}</strong>
+                  </div>
+
+                  <div className="detail-card">
+                    <span>Fitness</span>
+                    <strong>{candidate.fitness}</strong>
+                  </div>
+
+                  <div className="detail-card">
+                    <span>Overfitting risk</span>
+                    <strong>{candidate.overfitting_risk}</strong>
+                  </div>
+
+                  <div className="detail-card">
+                    <span>Source hash</span>
+                    <strong className="mono">
+                      {candidate.source_hash}
+                    </strong>
+                  </div>
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+      ) : (
+        run.candidate && (
+          <section className="section">
+            <p className="section-label">CANDIDATE</p>
+
+            <div className="detail-grid">
+              <div className="detail-card">
+                <span>Count</span>
+                <strong>{run.candidate.count}</strong>
+              </div>
+
+              <div className="detail-card">
+                <span>Outcome</span>
+                <strong>{run.candidate.outcome}</strong>
+              </div>
+
+              <div className="detail-card">
+                <span>Fitness</span>
+                <strong>{run.candidate.fitness}</strong>
+              </div>
+
+              <div className="detail-card">
+                <span>Overfitting risk</span>
+                <strong>{run.candidate.overfitting_risk}</strong>
+              </div>
+
+              <div className="detail-card">
+                <span>Mutation calls</span>
+                <strong>{run.candidate.mutation_calls}</strong>
+              </div>
+            </div>
+          </section>
+        )
+      )}
+
+      {statisticalTrace && (
+        <section className="section">
+          <p className="section-label">STATISTICAL TRACE</p>
+
+          <div className="detail-grid">
+            <div className="detail-card">
+              <span>Candidate slots requested</span>
+              <strong>
+                {statisticalTrace.candidate_slots_requested}
+              </strong>
+            </div>
+
+            <div className="detail-card">
+              <span>Distinct candidates evaluated</span>
+              <strong>
+                {statisticalTrace.distinct_candidates_evaluated}
+              </strong>
+            </div>
+
+            <div className="detail-card">
+              <span>Mutation calls</span>
+              <strong>
+                {statisticalTrace.mutation_calls}
+              </strong>
+            </div>
+
+            <div className="detail-card">
+              <span>Evolutionary trial count observed</span>
+              <strong>
+                {statisticalTrace.evolutionary_trial_count_observed
+                  ? "Yes"
+                  : "No"}
+              </strong>
+            </div>
+
+            <div className="detail-card">
+              <span>CV statistics observed</span>
+              <strong>
+                {statisticalTrace.cv_statistics_observed
+                  ? "Yes"
+                  : "No"}
+              </strong>
+            </div>
+
+            <div className="detail-card">
+              <span>Separate statistical implementation</span>
+              <strong>
+                {statisticalTrace.separate_statistical_implementation_exists
+                  ? "Yes"
+                  : "No"}
+              </strong>
+            </div>
           </div>
 
-          <div className="detail-card">
-            <span>Outcome</span>
-            <strong>{run.candidate.outcome}</strong>
-          </div>
+          <div className="observation-list">
+            <article>
+              <p>
+                E1 candidate evaluation references
+              </p>
 
-          <div className="detail-card">
-            <span>Fitness</span>
-            <strong>{run.candidate.fitness}</strong>
-          </div>
+              <ul className="evidence-list">
+                <li>
+                  <span className="evidence-mark">
+                    {statisticalTrace.e1_candidate_evaluation_references
+                      .run_cv_backtest
+                      ? "✓"
+                      : "—"}
+                  </span>
+                  run_cv_backtest
+                </li>
 
-          <div className="detail-card">
-            <span>Overfitting risk</span>
-            <strong>
-              {run.candidate.overfitting_risk}
-            </strong>
-          </div>
+                <li>
+                  <span className="evidence-mark">
+                    {statisticalTrace.e1_candidate_evaluation_references
+                      .deflated_sharpe_ratio
+                      ? "✓"
+                      : "—"}
+                  </span>
+                  deflated_sharpe_ratio
+                </li>
 
-          <div className="detail-card">
-            <span>Mutation calls</span>
-            <strong>{run.candidate.mutation_calls}</strong>
+                <li>
+                  <span className="evidence-mark">
+                    {statisticalTrace.e1_candidate_evaluation_references
+                      .probability_of_backtest_overfitting
+                      ? "✓"
+                      : "—"}
+                  </span>
+                  probability_of_backtest_overfitting
+                </li>
+              </ul>
+            </article>
           </div>
-        </div>
-      </section>
+        </section>
+      )}
 
       <section className="section">
         <p className="section-label">VERIFIED BOUNDARIES</p>
@@ -204,21 +342,50 @@ export default async function RunPage({
         </div>
       </section>
 
-      <section className="section">
-        <p className="section-label">SOURCE ARTIFACT</p>
+      {run.source ? (
+        <section className="section">
+          <p className="section-label">SOURCE</p>
 
-        <div className="detail-grid">
-          <div className="detail-card">
-            <span>Artifact</span>
-            <strong>{run.source_artifact.name}</strong>
-          </div>
+          <div className="detail-grid">
+            <div className="detail-card">
+              <span>Workflow run</span>
+              <strong>{run.source.workflow_run}</strong>
+            </div>
 
-          <div className="detail-card">
-            <span>Workflow run</span>
-            <strong>{run.source_artifact.workflow_run}</strong>
+            <div className="detail-card">
+              <span>Testing Ground commit</span>
+              <strong className="mono">
+                {run.source.workflow_commit}
+              </strong>
+            </div>
+
+            <div className="detail-card">
+              <span>Inalpha commit</span>
+              <strong className="mono">
+                {run.source.inalpha_commit}
+              </strong>
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
+      ) : (
+        run.source_artifact && (
+          <section className="section">
+            <p className="section-label">SOURCE ARTIFACT</p>
+
+            <div className="detail-grid">
+              <div className="detail-card">
+                <span>Artifact</span>
+                <strong>{run.source_artifact.name}</strong>
+              </div>
+
+              <div className="detail-card">
+                <span>Workflow run</span>
+                <strong>{run.source_artifact.workflow_run}</strong>
+              </div>
+            </div>
+          </section>
+        )
+      )}
 
       <footer>
         Evidence from an actual Testing Ground run.
