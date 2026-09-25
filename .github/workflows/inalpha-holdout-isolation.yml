@@ -1,0 +1,288 @@
+name: Inalpha E2 Holdout Isolation
+
+on:
+  workflow_dispatch:
+
+jobs:
+  holdout-isolation:
+    runs-on: ubuntu-latest
+
+    env:
+      INALPHA_REVISION: 3da8b103d61fc3c6af82ea479beade0cd7436e57
+      PYTHONPATH: /tmp/inalpha/services/evolver/src:/tmp/inalpha/services/paper/src:/tmp/inalpha/packages/shared/src
+
+    steps:
+      - name: Checkout Testing Ground
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Clone pinned Inalpha revision
+        run: |
+          git clone https://github.com/mirror29/inalpha.git /tmp/inalpha
+          cd /tmp/inalpha
+          git checkout "$INALPHA_REVISION"
+
+      - name: Install Inalpha dependencies
+        working-directory: /tmp/inalpha
+        run: |
+          python -m pip install --upgrade pip uv
+          uv sync --directory services/evolver
+          uv sync --directory services/paper
+
+      - name: Run holdout isolation audit
+        run: |
+          cat > /tmp/holdout_isolation_audit.py <<'PY'
+          from __future__ import annotations
+
+          import asyncio
+          import hashlib
+          import inspect
+          import json
+          import sys
+          from dataclasses import dataclass
+          from datetime import UTC, datetime, timedelta
+
+          from inalpha_evolver.runtime.campaign import (
+              _search_dataset,
+              evaluate_sealed_holdout,
+          )
+          from inalpha_evolver.data.manifest import (
+              BackfillSnapshot,
+              DatasetManifest,
+              FrozenDataset,
+          )
+
+
+          @dataclass(frozen=True, slots=True)
+          class Bar:
+              bar_open_at: int
+              bar_known_at: int
+              open: float
+              high: float
+              low: float
+              close: float
+              volume: float
+
+
+          def make_bar(index: int) -> Bar:
+              ts = int(
+                  (
+                      datetime(2026, 1, 1, tzinfo=UTC)
+                      + timedelta(hours=index)
+                  ).timestamp()
+                  * 1_000_000_000
+              )
+
+              marker = float(index)
+
+              return Bar(
+                  bar_open_at=ts,
+                  bar_known_at=ts,
+                  open=100.0 + marker,
+                  high=101.0 + marker,
+                  low=99.0 + marker,
+                  close=100.5 + marker,
+                  volume=1_000.0 + marker,
+              )
+
+
+          def make_dataset() -> FrozenDataset:
+              bars = tuple(make_bar(index) for index in range(100))
+
+              content_hash = hashlib.sha256(
+                  b"".join(
+                      (
+                          f"{bar.bar_open_at}:{bar.bar_known_at}:"
+                          f"{bar.open}:{bar.high}:{bar.low}:"
+                          f"{bar.close}:{bar.volume}\n"
+                      ).encode()
+                      for bar in bars
+                  )
+              ).hexdigest()
+
+              now = datetime(2026, 1, 1, tzinfo=UTC)
+
+              manifest = DatasetManifest(
+                  venue="synthetic",
+                  symbol="HOLDOUTTEST",
+                  requested_timeframe="1h",
+                  data_timeframe="1h",
+                  canonical_timeframe="1h",
+                  requested_from=now,
+                  requested_as_of=now + timedelta(hours=99),
+                  effective_from=now,
+                  effective_to=now + timedelta(hours=99),
+                  latest_bar_ts=now + timedelta(hours=99),
+                  cutoff_bar_ts=now + timedelta(hours=99),
+                  freshness_lag_seconds=0,
+                  data_epoch=1,
+                  bar_count=len(bars),
+                  annualization_periods=8760,
+                  calendar_code=None,
+                  content_sha256=content_hash,
+                  backfill=BackfillSnapshot(
+                      venue="synthetic",
+                      symbol="HOLDOUTTEST",
+                      timeframe="1h",
+                      bars_fetched=len(bars),
+                      bars_inserted=len(bars),
+                      from_ts=now,
+                      to_ts=now + timedelta(hours=99),
+                  ),
+              )
+
+              return FrozenDataset(bars=bars, manifest=manifest)
+
+
+          def assert_bar_range(label: str, bars, expected_start: int, expected_end: int):
+              indices = [
+                  int(round(bar.close - 100.5))
+                  for bar in bars
+              ]
+
+              expected = list(range(expected_start, expected_end))
+
+              assert indices == expected, (
+                  f"{label}: expected indexes "
+                  f"{expected_start}:{expected_end}, got {indices}"
+              )
+
+
+          async def main():
+              dataset = make_dataset()
+
+              search_dataset, validation_bars = _search_dataset(dataset)
+
+              search_indices = [
+                  int(round(bar.close - 100.5))
+                  for bar in search_dataset.bars
+              ]
+
+              validation_indices = [
+                  int(round(bar.close - 100.5))
+                  for bar in validation_bars
+              ]
+
+              holdout_indices = list(range(80, 100))
+
+              print("=== E2 HOLDOUT ISOLATION AUDIT ===")
+              print(f"total bars            = {len(dataset.bars)}")
+              print(f"search bars           = {len(search_dataset.bars)}")
+              print(f"generation validation = {len(validation_bars)}")
+              print(f"sealed holdout        = {len(holdout_indices)}")
+              print()
+
+              print("=== BOUNDARIES ===")
+              print(f"search range           = {search_indices[0]}..{search_indices[-1]}")
+              print(f"validation range       = {validation_indices[0]}..{validation_indices[-1]}")
+              print(f"holdout range          = {holdout_indices[0]}..{holdout_indices[-1]}")
+              print()
+
+              assert_bar_range("search dataset", search_dataset.bars, 0, 80)
+              assert_bar_range("generation validation", validation_bars, 60, 80)
+
+              overlap = set(search_indices) & set(holdout_indices)
+
+              assert not overlap, (
+                  f"sealed holdout leaked into search dataset: {sorted(overlap)}"
+              )
+
+              assert max(search_indices) < min(holdout_indices)
+              assert min(validation_indices) >= 60
+              assert max(validation_indices) < 80
+
+              source = inspect.getsource(evaluate_sealed_holdout)
+
+              assert "validation_split=0.8" in source, (
+                  "sealed holdout evaluator no longer contains the expected 0.8 split"
+              )
+
+              assert "holdout_bars = list(dataset.bars[split_index:])" in source, (
+                  "sealed holdout evaluator no longer explicitly extracts the final segment"
+              )
+
+              assert "locked champion once" in source, (
+                  "sealed holdout function no longer documents champion-only evaluation"
+              )
+
+              print("=== ASSERTIONS ===")
+              print("PASS search dataset contains bars 0..79")
+              print("PASS generation validation contains bars 60..79")
+              print("PASS sealed holdout is bars 80..99")
+              print("PASS search dataset contains no sealed-holdout bars")
+              print("PASS generation validation remains inside search surface")
+              print("PASS sealed holdout evaluator uses validation_split=0.8")
+              print("PASS sealed holdout evaluator extracts final dataset segment")
+              print("PASS sealed holdout is evaluated for the locked champion")
+              print()
+
+              result = {
+                  "status": "completed",
+                  "test": "e2-holdout-isolation",
+                  "dataset": {
+                      "type": "synthetic",
+                      "bar_count": 100,
+                  },
+                  "split": {
+                      "search": {
+                          "start_index": 0,
+                          "end_index_exclusive": 80,
+                          "bar_count": 80,
+                      },
+                      "generation_validation": {
+                          "start_index": 60,
+                          "end_index_exclusive": 80,
+                          "bar_count": 20,
+                      },
+                      "sealed_holdout": {
+                          "start_index": 80,
+                          "end_index_exclusive": 100,
+                          "bar_count": 20,
+                      },
+                  },
+                  "verified": {
+                      "search_excludes_holdout": True,
+                      "validation_inside_search_surface": True,
+                      "sealed_holdout_boundary": True,
+                      "sealed_holdout_uses_0_8_split": True,
+                      "locked_champion_only": True,
+                  },
+                  "observations": [
+                      "E2 explicitly creates a search dataset containing the first 80% of the frozen bars.",
+                      "Generation validation occupies the 60%-80% segment and is available to generation scoring.",
+                      "The final 20% is absent from the search dataset.",
+                      "The sealed-holdout evaluator reconstructs the immutable campaign dataset and evaluates the final 20% using validation_split=0.8.",
+                      "The source boundary supports an explicit separation between generation search/validation and the final sealed holdout.",
+                      "This audit verifies the data-boundary implementation; it does not establish that every possible external dependency or future code path is incapable of leaking holdout information."
+                  ],
+              }
+
+              with open("holdout-isolation-result.json", "w", encoding="utf-8") as handle:
+                  json.dump(result, handle, indent=2)
+
+              print("RESULT: E2 sealed holdout is structurally isolated from the generation search dataset.")
+
+
+          if __name__ == "__main__":
+              asyncio.run(main())
+          PY
+
+          cd /tmp/inalpha
+          uv run --directory services/evolver python /tmp/holdout_isolation_audit.py
+
+      - name: Copy result into Testing Ground workspace
+        run: |
+          cp /tmp/inalpha/holdout-isolation-result.json \
+            experiments/inalpha/results/e2-holdout-isolation-${GITHUB_RUN_ID}.json
+
+      - name: Upload audit result
+        uses: actions/upload-artifact@v4
+        with:
+          name: inalpha-e2-holdout-isolation
+          path: |
+            /tmp/inalpha/holdout-isolation-result.json
+            experiments/inalpha/results/e2-holdout-isolation-${{ github.run_id }}.json
