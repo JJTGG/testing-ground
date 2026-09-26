@@ -13,70 +13,64 @@ jobs:
         env:
           POSTGRES_USER: quant
           POSTGRES_PASSWORD: devpass
-          POSTGRES_DB: inalpha_test
+          POSTGRES_DB: inalpha
         ports:
           - 5433:5432
         options: >-
-          --health-cmd "pg_isready -U quant -d inalpha_test"
+          --health-cmd "pg_isready -U quant -d inalpha"
           --health-interval 5s
-          --health-timeout 5s
+          --health-timeout 3s
           --health-retries 20
 
     steps:
       - name: Checkout Testing Ground
         uses: actions/checkout@v4
 
-      - name: Checkout pinned Inalpha revision
-        env:
-          INALPHA_REVISION: 3da8b103d61fc3c6af82ea479beade0cd7436e57
-        run: |
-          git clone https://github.com/mirror29/inalpha.git /tmp/inalpha
-          cd /tmp/inalpha
-          git checkout "$INALPHA_REVISION"
+      - name: Checkout Inalpha
+        uses: actions/checkout@v4
+        with:
+          repository: mirror29/inalpha
+          ref: 3da8b103d61fc3c6af82ea479beade0cd7436e57
+          path: inalpha
 
       - name: Install uv
         uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
 
-      - name: Install Inalpha evolver dependencies
-        working-directory: /tmp/inalpha
-        run: |
-          uv sync --directory services/evolver
-          uv sync --directory services/paper
+      - name: Install migration dependencies
+        working-directory: inalpha/infra/migrations
+        run: uv sync --group dev
 
-      - name: Prepare database
-        working-directory: /tmp/inalpha
+      - name: Create disposable test database
         env:
-          DATABASE_URL: postgresql+psycopg://quant:devpass@localhost:5433/inalpha_test
+          PGPASSWORD: devpass
         run: |
-          uv run --directory services/evolver python - <<'PY'
-          import asyncio
-          import os
-
-          import psycopg
-
-          async def main():
-              url = os.environ["DATABASE_URL"].replace(
-                  "postgresql+psycopg://",
-                  "postgresql://",
-              )
-
-              async with await psycopg.AsyncConnection.connect(url) as conn:
-                  await conn.execute("CREATE EXTENSION IF NOT EXISTS timescaledb")
-                  await conn.commit()
-
-          asyncio.run(main())
-          PY
+          psql \
+            -h 127.0.0.1 \
+            -p 5433 \
+            -U quant \
+            -d inalpha \
+            -c 'CREATE DATABASE inalpha_test;'
 
       - name: Run Inalpha migrations
-        working-directory: /tmp/inalpha
+        working-directory: inalpha/infra/migrations
         env:
-          DATABASE_URL: postgresql+psycopg://quant:devpass@localhost:5433/inalpha_test
+          DATABASE_URL: postgresql+psycopg://quant:devpass@127.0.0.1:5433/inalpha_test
         run: |
-          uv run --directory services/evolver python -m inalpha_evolver.storage.migrations
+          uv run alembic upgrade head
+
+      - name: Install Evolver dependencies
+        working-directory: inalpha/services/evolver
+        run: uv sync --group dev
+
+      - name: Install Paper dependencies
+        working-directory: inalpha/services/paper
+        run: uv sync --group dev
 
       - name: Write holdout state-machine audit
         run: |
-          cat > /tmp/inalpha/holdout-state-machine-audit.py <<'PY'
+          cat > inalpha/holdout-state-machine-audit.py <<'PY'
           from __future__ import annotations
 
           import asyncio
@@ -90,7 +84,7 @@ jobs:
           import psycopg
           from psycopg.rows import dict_row
 
-          sys.path.insert(0, "/tmp/inalpha/services/evolver/src")
+          sys.path.insert(0, "services/evolver/src")
 
           from inalpha_evolver.storage.campaigns import (
               claim_holdout_attempt,
@@ -99,7 +93,9 @@ jobs:
               reserve_holdout_attempt,
           )
 
-          DATABASE_URL = "postgresql://quant:devpass@localhost:5433/inalpha_test"
+          DATABASE_URL = (
+              "postgresql://quant:devpass@127.0.0.1:5433/inalpha_test"
+          )
 
           OWNER_ID = uuid4()
           CAMPAIGN_ID = uuid4()
@@ -109,7 +105,7 @@ jobs:
           LEASE_TOKEN = uuid4()
 
           RESULT_PATH = Path(
-              "/tmp/inalpha/services/evolver/holdout-state-machine-result.json"
+              "services/evolver/holdout-state-machine-result.json"
           )
 
 
@@ -253,7 +249,10 @@ jobs:
                           CAMPAIGN_ID,
                           json.dumps(spec),
                           hashlib.sha256(
-                              json.dumps(spec, sort_keys=True).encode()
+                              json.dumps(
+                                  spec,
+                                  sort_keys=True,
+                              ).encode()
                           ).hexdigest(),
                       ),
                   )
@@ -400,9 +399,10 @@ jobs:
                   async with conn.cursor() as cur:
                       await cur.execute(
                           """
-                          SELECT status,
-                                 holdout_consumed_at,
-                                 locked_candidate_id
+                          SELECT
+                              status,
+                              holdout_consumed_at,
+                              locked_candidate_id
                           FROM evolution_campaigns
                           WHERE campaign_id = %s
                           """,
@@ -412,12 +412,17 @@ jobs:
 
                   assert campaign["status"] == "graduated"
                   assert campaign["holdout_consumed_at"] is not None
-                  assert campaign["locked_candidate_id"] == IMPLEMENTATION_ID
+                  assert (
+                      campaign["locked_candidate_id"]
+                      == IMPLEMENTATION_ID
+                  )
 
                   result = {
                       "status": "completed",
                       "test": "e2-holdout-state-machine",
-                      "inalpha_revision": "3da8b103d61fc3c6af82ea479beade0cd7436e57",
+                      "inalpha_revision": (
+                          "3da8b103d61fc3c6af82ea479beade0cd7436e57"
+                      ),
                       "verified": {
                           "first_reservation_succeeds": True,
                           "reservation_is_idempotent": True,
@@ -429,14 +434,37 @@ jobs:
                           "campaign_becomes_terminal": True,
                       },
                       "observations": [
-                          "The holdout attempt is reserved only from holdout_ready.",
-                          "The campaign-level reservation prevents a second holdout attempt.",
-                          "The running attempt is protected by a fencing token and lease.",
-                          "The active attempt exposes only its pre-committed candidate.",
-                          "Terminal finalization is fenced to the active attempt.",
-                          "Successful finalization transitions the campaign from holdout_ready to graduated.",
-                          "This audit verifies the durable state-machine boundary; it does not execute the sealed holdout evaluation itself."
-                      ]
+                          (
+                              "The holdout attempt is reserved only "
+                              "from holdout_ready."
+                          ),
+                          (
+                              "The campaign-level reservation prevents "
+                              "a second holdout attempt."
+                          ),
+                          (
+                              "The running attempt is protected by a "
+                              "fencing token and lease."
+                          ),
+                          (
+                              "The active attempt exposes only its "
+                              "pre-committed candidate."
+                          ),
+                          (
+                              "Terminal finalization is fenced to the "
+                              "active attempt."
+                          ),
+                          (
+                              "Successful finalization transitions the "
+                              "campaign from holdout_ready to graduated."
+                          ),
+                          (
+                              "This audit verifies the durable "
+                              "state-machine boundary; it does not "
+                              "execute the sealed holdout evaluation "
+                              "itself."
+                          ),
+                      ],
                   }
 
                   RESULT_PATH.write_text(
@@ -452,21 +480,25 @@ jobs:
           PY
 
       - name: Run holdout state-machine audit
-        working-directory: /tmp/inalpha
+        working-directory: inalpha
+        env:
+          DATABASE_URL: postgresql+psycopg://quant:devpass@127.0.0.1:5433/inalpha_test
         run: |
           uv run --directory services/evolver \
-            python /tmp/inalpha/holdout-state-machine-audit.py
+            python holdout-state-machine-audit.py
 
       - name: Preserve result in Testing Ground
         run: |
           mkdir -p experiments/inalpha/results
-          cp /tmp/inalpha/services/evolver/holdout-state-machine-result.json \
+          cp \
+            inalpha/services/evolver/holdout-state-machine-result.json \
             "experiments/inalpha/results/e2-holdout-state-machine-${GITHUB_RUN_ID}.json"
 
       - name: Upload audit result
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: inalpha-e2-holdout-state-machine
           path: |
-            /tmp/inalpha/services/evolver/holdout-state-machine-result.json
+            inalpha/services/evolver/holdout-state-machine-result.json
             experiments/inalpha/results/e2-holdout-state-machine-${{ github.run_id }}.json
