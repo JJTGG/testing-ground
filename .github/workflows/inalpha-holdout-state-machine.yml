@@ -160,6 +160,9 @@ jobs:
                       ),
                   )
 
+                  # Create the campaign first without a locked candidate.
+                  # The database enforces that locked_candidate_id must
+                  # reference an existing evolution_implementations row.
                   await conn.execute(
                       """
                       INSERT INTO evolution_campaigns (
@@ -189,7 +192,7 @@ jobs:
                           %s::jsonb,
                           %s::jsonb,
                           %s,
-                          %s,
+                          NULL,
                           %s,
                           %s
                       )
@@ -215,7 +218,6 @@ jobs:
                               ).hexdigest(),
                           }),
                           hashlib.sha256(b"llm-config").hexdigest(),
-                          IMPLEMENTATION_ID,
                           LEASE_TOKEN,
                           now + timedelta(minutes=10),
                       ),
@@ -281,6 +283,20 @@ jobs:
                           HYPOTHESIS_ID,
                           source_code,
                           source_hash,
+                      ),
+                  )
+
+                  # Now that the implementation exists, establish the
+                  # campaign's locked-candidate relationship.
+                  await conn.execute(
+                      """
+                      UPDATE evolution_campaigns
+                      SET locked_candidate_id = %s
+                      WHERE campaign_id = %s
+                      """,
+                      (
+                          IMPLEMENTATION_ID,
+                          CAMPAIGN_ID,
                       ),
                   )
 
@@ -486,6 +502,7 @@ jobs:
             python holdout-state-machine-audit.py
 
       - name: Preserve result in Testing Ground
+        if: success()
         run: |
           mkdir -p experiments/inalpha/results
           cp \
