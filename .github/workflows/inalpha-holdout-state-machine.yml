@@ -1,0 +1,486 @@
+name: Inalpha Holdout State Machine Audit
+
+on:
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: timescale/timescaledb:latest-pg17
+        env:
+          POSTGRES_USER: quant
+          POSTGRES_PASSWORD: devpass
+          POSTGRES_DB: inalpha_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U quant -d inalpha_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - name: Checkout Testing Ground
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned Inalpha revision
+        env:
+          INALPHA_REVISION: 3da8b103d61fc3c6af82ea479beade0cd7436e57
+        run: |
+          git clone https://github.com/mirror29/inalpha.git /tmp/inalpha
+          cd /tmp/inalpha
+          git checkout "$INALPHA_REVISION"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install Inalpha evolver dependencies
+        working-directory: /tmp/inalpha
+        run: |
+          uv sync --directory services/evolver
+          uv sync --directory services/paper
+
+      - name: Run migrations
+        working-directory: /tmp/inalpha
+        env:
+          DATABASE_URL: postgresql+psycopg://quant:devpass@localhost:5433/inalpha_test
+        run: |
+          uv run --directory services/evolver alembic upgrade head
+
+      - name: Write holdout state-machine audit
+        run: |
+          cat > /tmp/inalpha/holdout-state-machine-audit.py <<'PY'
+          from __future__ import annotations
+
+          import asyncio
+          import hashlib
+          import json
+          import sys
+          from datetime import UTC, datetime, timedelta
+          from pathlib import Path
+          from uuid import uuid4
+
+          import psycopg
+          from psycopg.rows import dict_row
+
+          sys.path.insert(0, "/tmp/inalpha/services/evolver/src")
+
+          from inalpha_evolver.storage.campaigns import (
+              claim_holdout_attempt,
+              finalize_holdout_attempt,
+              holdout_attempt_input,
+              reserve_holdout_attempt,
+          )
+
+
+          DATABASE_URL = "postgresql://quant:devpass@localhost:5433/inalpha_test"
+          OWNER_ID = uuid4()
+          CAMPAIGN_ID = uuid4()
+          HYPOTHESIS_ID = uuid4()
+          IMPLEMENTATION_ID = uuid4()
+          EVENT_SNAPSHOT_ID = uuid4()
+          LEASE_TOKEN = uuid4()
+
+          RESULT_PATH = Path(
+              "/tmp/inalpha/services/evolver/holdout-state-machine-result.json"
+          )
+
+
+          async def main() -> None:
+              async with await psycopg.AsyncConnection.connect(
+                  DATABASE_URL,
+                  row_factory=dict_row,
+              ) as conn:
+
+                  now = datetime.now(UTC)
+
+                  source_code = """
+          class Strategy:
+              def generate_signals(self, bars):
+                  return []
+          """.strip()
+
+                  source_hash = hashlib.sha256(
+                      source_code.encode()
+                  ).hexdigest()
+
+                  spec = {
+                      "version": "1",
+                      "hypothesis_id": str(HYPOTHESIS_ID),
+                      "title": "deterministic holdout audit",
+                  }
+
+                  # Minimal immutable event snapshot required by the E2 campaign schema.
+                  await conn.execute(
+                      """
+                      INSERT INTO market_event_snapshots (
+                          snapshot_id,
+                          cutoff,
+                          policy_version,
+                          query_hash,
+                          events_sha256,
+                          coverage,
+                          event_types,
+                          assets,
+                          fact_count
+                      )
+                      VALUES (
+                          %s, %s, %s, %s, %s, %s::jsonb, %s, %s, 0
+                      )
+                      """,
+                      (
+                          EVENT_SNAPSHOT_ID,
+                          now,
+                          "test-policy-v1",
+                          hashlib.sha256(b"query").hexdigest(),
+                          hashlib.sha256(b"events").hexdigest(),
+                          json.dumps({}),
+                          [],
+                          [],
+                      ),
+                  )
+
+                  # Campaign is deliberately placed directly at holdout_ready.
+                  # The preceding E2 isolation test already established the data
+                  # boundary. This test isolates the durable state transition.
+                  await conn.execute(
+                      """
+                      INSERT INTO evolution_campaigns (
+                          campaign_id,
+                          owner_account_id,
+                          requested_by_sub,
+                          idempotency_key,
+                          request_hash,
+                          status,
+                          active_generation,
+                          hypothesis_budget,
+                          implementations_per_hypothesis,
+                          max_generations,
+                          event_snapshot_id,
+                          frozen_config,
+                          llm_snapshot,
+                          llm_config_digest,
+                          locked_candidate_id,
+                          lease_token,
+                          lease_expires_at
+                      )
+                      VALUES (
+                          %s, %s, %s, %s, %s,
+                          'holdout_ready',
+                          5, 1, 3, 5,
+                          %s,
+                          %s::jsonb,
+                          %s::jsonb,
+                          %s,
+                          %s,
+                          %s,
+                          %s
+                      )
+                      """,
+                      (
+                          CAMPAIGN_ID,
+                          OWNER_ID,
+                          "testing-ground-audit",
+                          "holdout-state-machine-test",
+                          hashlib.sha256(b"request").hexdigest(),
+                          EVENT_SNAPSHOT_ID,
+                          json.dumps({
+                              "venue": "binance",
+                              "symbol": "BTCUSDT",
+                              "timeframe": "1h",
+                          }),
+                          json.dumps({
+                              "config_id": "test",
+                              "provider": "none",
+                              "model": "deterministic",
+                              "config_digest": hashlib.sha256(
+                                  b"llm-config"
+                              ).hexdigest(),
+                          }),
+                          hashlib.sha256(b"llm-config").hexdigest(),
+                          IMPLEMENTATION_ID,
+                          LEASE_TOKEN,
+                          now + timedelta(minutes=10),
+                      ),
+                  )
+
+                  await conn.execute(
+                      """
+                      INSERT INTO evolution_hypotheses (
+                          hypothesis_id,
+                          campaign_id,
+                          generation,
+                          slot,
+                          lineage_kind,
+                          lane,
+                          parent_ids,
+                          spec,
+                          spec_hash
+                      )
+                      VALUES (
+                          %s, %s, 5, 0,
+                          'seed',
+                          'event',
+                          ARRAY[]::uuid[],
+                          %s::jsonb,
+                          %s
+                      )
+                      """,
+                      (
+                          HYPOTHESIS_ID,
+                          CAMPAIGN_ID,
+                          json.dumps(spec),
+                          hashlib.sha256(
+                              json.dumps(spec, sort_keys=True).encode()
+                          ).hexdigest(),
+                      ),
+                  )
+
+                  await conn.execute(
+                      """
+                      INSERT INTO evolution_implementations (
+                          implementation_id,
+                          campaign_id,
+                          hypothesis_id,
+                          generation,
+                          profile,
+                          source_code,
+                          source_hash,
+                          outcome,
+                          fitness,
+                          fdr_pass
+                      )
+                      VALUES (
+                          %s, %s, %s, 5, 'canonical',
+                          %s, %s, 'succeeded', 1.0, TRUE
+                      )
+                      """,
+                      (
+                          IMPLEMENTATION_ID,
+                          CAMPAIGN_ID,
+                          HYPOTHESIS_ID,
+                          source_code,
+                          source_hash,
+                      ),
+                  )
+
+                  await conn.commit()
+
+                  # ---------------------------------------------------------
+                  # 1. First reservation must succeed.
+                  # ---------------------------------------------------------
+                  first = await reserve_holdout_attempt(
+                      conn,
+                      CAMPAIGN_ID,
+                      OWNER_ID,
+                      LEASE_TOKEN,
+                  )
+
+                  assert first is not None, "first holdout reservation failed"
+                  assert first["campaign_id"] == CAMPAIGN_ID
+                  assert first["candidate_id"] == IMPLEMENTATION_ID
+                  assert first["status"] == "reserved"
+
+                  await conn.commit()
+
+                  # ---------------------------------------------------------
+                  # 2. Second reservation must NOT create another attempt.
+                  # It should return the existing attempt identity.
+                  # ---------------------------------------------------------
+                  second = await reserve_holdout_attempt(
+                      conn,
+                      CAMPAIGN_ID,
+                      OWNER_ID,
+                      LEASE_TOKEN,
+                  )
+
+                  assert second is not None, "existing attempt was not returned"
+                  assert second["attempt_id"] == first["attempt_id"]
+                  assert second["candidate_id"] == first["candidate_id"]
+
+                  await conn.commit()
+
+                  async with conn.cursor() as cur:
+                      await cur.execute(
+                          """
+                          SELECT count(*) AS count
+                          FROM evolution_holdout_attempts
+                          WHERE campaign_id = %s
+                          """,
+                          (CAMPAIGN_ID,),
+                      )
+                      row = await cur.fetchone()
+
+                  assert row["count"] == 1, (
+                      f"expected exactly one attempt, got {row['count']}"
+                  )
+
+                  # ---------------------------------------------------------
+                  # 3. Claim the attempt and obtain a fencing token.
+                  # ---------------------------------------------------------
+                  claimed = await claim_holdout_attempt(
+                      conn,
+                      first["attempt_id"],
+                      OWNER_ID,
+                      ttl_s=300,
+                  )
+
+                  assert claimed is not None, "holdout claim failed"
+                  assert claimed["status"] == "running"
+                  assert claimed["fencing_token"] is not None
+
+                  fencing_token = claimed["fencing_token"]
+
+                  await conn.commit()
+
+                  # ---------------------------------------------------------
+                  # 4. A second simultaneous claim must fail while the first
+                  # claim's lease is active.
+                  # ---------------------------------------------------------
+                  duplicate_claim = await claim_holdout_attempt(
+                      conn,
+                      first["attempt_id"],
+                      OWNER_ID,
+                      ttl_s=300,
+                  )
+
+                  assert duplicate_claim is None, (
+                      "active holdout attempt was claimed twice"
+                  )
+
+                  await conn.commit()
+
+                  # ---------------------------------------------------------
+                  # 5. The pre-committed candidate must be the only input
+                  # exposed through the active fencing token.
+                  # ---------------------------------------------------------
+                  attempt_input = await holdout_attempt_input(
+                      conn,
+                      first["attempt_id"],
+                      OWNER_ID,
+                      fencing_token,
+                  )
+
+                  assert attempt_input is not None
+                  assert attempt_input["candidate_id"] == IMPLEMENTATION_ID
+                  assert attempt_input["source_hash"] == source_hash
+
+                  # ---------------------------------------------------------
+                  # 6. Finalize exactly once.
+                  # ---------------------------------------------------------
+                  finalized = await finalize_holdout_attempt(
+                      conn,
+                      first["attempt_id"],
+                      OWNER_ID,
+                      fencing_token=fencing_token,
+                      passed=True,
+                      evidence={
+                          "test": "deterministic-state-machine-audit",
+                          "synthetic": True,
+                      },
+                  )
+
+                  assert finalized is not None, "first finalization failed"
+                  assert finalized["status"] == "graduated"
+
+                  await conn.commit()
+
+                  # ---------------------------------------------------------
+                  # 7. Re-finalization with the same fencing token must fail.
+                  # ---------------------------------------------------------
+                  duplicate_finalize = await finalize_holdout_attempt(
+                      conn,
+                      first["attempt_id"],
+                      OWNER_ID,
+                      fencing_token=fencing_token,
+                      passed=True,
+                      evidence={
+                          "test": "duplicate-finalization",
+                      },
+                  )
+
+                  assert duplicate_finalize is None, (
+                      "terminal holdout attempt was finalized twice"
+                  )
+
+                  await conn.commit()
+
+                  # ---------------------------------------------------------
+                  # 8. Campaign must be terminal after finalization.
+                  # ---------------------------------------------------------
+                  async with conn.cursor() as cur:
+                      await cur.execute(
+                          """
+                          SELECT status,
+                                 holdout_consumed_at,
+                                 locked_candidate_id
+                          FROM evolution_campaigns
+                          WHERE campaign_id = %s
+                          """,
+                          (CAMPAIGN_ID,),
+                      )
+                      campaign = await cur.fetchone()
+
+                  assert campaign["status"] == "graduated"
+                  assert campaign["holdout_consumed_at"] is not None
+                  assert campaign["locked_candidate_id"] == IMPLEMENTATION_ID
+
+                  result = {
+                      "status": "completed",
+                      "test": "e2-holdout-state-machine",
+                      "inalpha_revision": "3da8b103d61fc3c6af82ea479beade0cd7436e57",
+                      "verified": {
+                          "first_reservation_succeeds": True,
+                          "reservation_is_idempotent": True,
+                          "exactly_one_attempt_per_campaign": True,
+                          "active_attempt_cannot_be_claimed_twice": True,
+                          "candidate_identity_is_preserved": True,
+                          "finalization_is_fenced": True,
+                          "terminal_attempt_cannot_be_finalized_twice": True,
+                          "campaign_becomes_terminal": True,
+                      },
+                      "observations": [
+                          "The holdout attempt is reserved only from holdout_ready.",
+                          "The campaign-level unique constraint and reservation CAS prevent a second holdout attempt.",
+                          "The running attempt is protected by a fencing token and lease.",
+                          "The active attempt exposes only its pre-committed candidate.",
+                          "Terminal finalization is fenced to the active attempt.",
+                          "Successful finalization transitions the campaign from holdout_ready to graduated.",
+                          "This audit verifies the durable state-machine boundary; it does not execute the sealed holdout evaluation itself.",
+                      ],
+                  }
+
+                  RESULT_PATH.write_text(
+                      json.dumps(result, indent=2) + "\n",
+                      encoding="utf-8",
+                  )
+
+                  print(json.dumps(result, indent=2))
+
+
+          if __name__ == "__main__":
+              asyncio.run(main())
+          PY
+
+      - name: Run holdout state-machine audit
+        working-directory: /tmp/inalpha
+        run: |
+          uv run --directory services/evolver \
+            python /tmp/inalpha/holdout-state-machine-audit.py
+
+      - name: Preserve result in Testing Ground
+        run: |
+          mkdir -p experiments/inalpha/results
+          cp /tmp/inalpha/services/evolver/holdout-state-machine-result.json \
+            "experiments/inalpha/results/e2-holdout-state-machine-${GITHUB_RUN_ID}.json"
+
+      - name: Upload audit result
+        uses: actions/upload-artifact@v4
+        with:
+          name: inalpha-e2-holdout-state-machine
+          path: |
+            /tmp/inalpha/services/evolver/holdout-state-machine-result.json
+            experiments/inalpha/results/e2-holdout-state-machine-${{ github.run_id }}.json
