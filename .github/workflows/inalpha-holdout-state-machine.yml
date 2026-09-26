@@ -70,7 +70,7 @@ jobs:
 
       - name: Write holdout state-machine audit
         run: |
-          cat > inalpha/holdout-state-machine-audit.py <<'PY'
+          cat > inalpha/services/evolver/holdout-state-machine-audit.py <<'PY'
           from __future__ import annotations
 
           import asyncio
@@ -84,7 +84,7 @@ jobs:
           import psycopg
           from psycopg.rows import dict_row
 
-          sys.path.insert(0, "services/evolver/src")
+          sys.path.insert(0, "src")
 
           from inalpha_evolver.storage.campaigns import (
               claim_holdout_attempt,
@@ -105,9 +105,8 @@ jobs:
           LEASE_TOKEN = uuid4()
 
           RESULT_PATH = Path(
-              "services/evolver/holdout-state-machine-result.json"
+              "holdout-state-machine-result.json"
           )
-
 
           async def main() -> None:
               async with await psycopg.AsyncConnection.connect(
@@ -473,7 +472,6 @@ jobs:
                   )
 
                   print(json.dumps(result, indent=2))
-
 
           if __name__ == "__main__":
               asyncio.run(main())
