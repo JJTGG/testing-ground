@@ -75,7 +75,6 @@ jobs:
 
           import hashlib
           import json
-          import os
           from contextlib import asynccontextmanager
           from datetime import UTC, datetime, timedelta
           from decimal import Decimal
@@ -90,6 +89,7 @@ jobs:
           from inalpha_paper.kernel.identifiers import InstrumentId
           from inalpha_paper.model.data import Bar
 
+          from inalpha_evolver.api import loop_start
           from inalpha_evolver.config import EvolverSettings
           from inalpha_evolver.data.manifest import (
               BackfillSnapshot,
@@ -112,15 +112,12 @@ jobs:
               loops,
               runs,
           )
-          from inalpha_evolver.api import loop_start
-
 
           DATABASE_URL = (
               "postgresql://quant:devpass@127.0.0.1:5433/inalpha_test"
           )
 
           RESULT_PATH = Path("sealed-holdout-evaluation-result.json")
-
 
           VALID_LLM_SNAPSHOT = {
               "config_id": "config-1",
@@ -157,6 +154,7 @@ jobs:
                 holdout: bars 8..9
               """
               start = datetime(2026, 1, 1, tzinfo=UTC)
+
               instrument = InstrumentId(
                   symbol="BTC/USDT",
                   venue="binance",
@@ -436,11 +434,7 @@ jobs:
                   ],
               }
 
-              return (
-                  worker,
-                  frozen,
-                  event_snapshot,
-              )
+              return worker, frozen, event_snapshot
 
 
           class FakeDataClient:
@@ -739,4 +733,107 @@ jobs:
                   "status": "completed",
                   "test": "e2-real-sealed-holdout-evaluation",
                   "inalpha_revision": (
-                      "3da8b103d61fc
+                      "3da8b103d61fc3c6af82ea479beade0cd7436e57"
+                  ),
+                  "campaign_id": str(campaign_id),
+                  "attempt_id": str(attempt_id),
+                  "candidate_id": str(
+                      implementation["implementation_id"]
+                  ),
+                  "candidate_source_hash": hashlib.sha256(
+                      compiled.source_code.encode()
+                  ).hexdigest(),
+                  "dataset": {
+                      "frozen_bar_count": 10,
+                      "discovery_end": 6,
+                      "validation_end": 8,
+                      "sealed_holdout_bars": 2,
+                  },
+                  "verified": {
+                      "production_campaign_handoff": True,
+                      "immutable_campaign_snapshot_used": True,
+                      "real_execute_campaign_holdout_branch": True,
+                      "real_sealed_holdout_evaluator": True,
+                      "real_frozen_dataset_evaluator": True,
+                      "real_killable_engine_runner": True,
+                      "locked_candidate_identity_preserved": True,
+                      "final_holdout_metrics_produced": True,
+                      "sealed_holdout_evidence_persisted": True,
+                      "holdout_consumed_once": True,
+                      "second_execution_did_not_create_new_attempt": True,
+                  },
+                  "metrics": metrics,
+                  "terminal_campaign_status": final_campaign[
+                      "status"
+                  ],
+                  "limitations": [
+                      (
+                          "The market dataset is synthetic and therefore "
+                          "does not establish strategy quality or real-market "
+                          "performance."
+                      ),
+                      (
+                          "The external event snapshot HTTP boundary was "
+                          "replaced with a deterministic fixture."
+                      ),
+                      (
+                          "The test verifies the actual sealed evaluation "
+                          "machinery, not production data-service behavior."
+                      ),
+                  ],
+              }
+
+              RESULT_PATH.write_text(
+                  json.dumps(
+                      result,
+                      indent=2,
+                      default=str,
+                  )
+                  + "\n",
+                  encoding="utf-8",
+              )
+
+              print(
+                  json.dumps(
+                      result,
+                      indent=2,
+                      default=str,
+                  )
+              )
+          PY
+
+      - name: Run real sealed holdout evaluation
+        working-directory: inalpha/services/evolver
+        env:
+          EVOLVER_TEST_DATABASE_URL: postgresql+psycopg://quant:devpass@127.0.0.1:5433/inalpha_test
+          DATABASE_URL: postgresql+psycopg://quant:devpass@127.0.0.1:5433/inalpha_test
+        run: |
+          set -o pipefail
+          uv run pytest \
+            sealed-holdout-evaluation-audit.py \
+            -v \
+            2>&1 | tee sealed-holdout-evaluation-output.txt
+
+      - name: Preserve result in Testing Ground
+        if: success()
+        run: |
+          mkdir -p experiments/inalpha/results
+
+          cp \
+            inalpha/services/evolver/sealed-holdout-evaluation-result.json \
+            "experiments/inalpha/results/e2-sealed-holdout-evaluation-${GITHUB_RUN_ID}.json"
+
+          cp \
+            inalpha/services/evolver/sealed-holdout-evaluation-output.txt \
+            "experiments/inalpha/results/e2-sealed-holdout-evaluation-${GITHUB_RUN_ID}.txt"
+
+      - name: Upload audit result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inalpha-e2-sealed-holdout-evaluation
+          path: |
+            inalpha/services/evolver/sealed-holdout-evaluation-result.json
+            inalpha/services/evolver/sealed-holdout-evaluation-output.txt
+            experiments/inalpha/results/e2-sealed-holdout-evaluation-${{ github.run_id }}.json
+            experiments/inalpha/results/e2-sealed-holdout-evaluation-${{ github.run_id }}.txt
