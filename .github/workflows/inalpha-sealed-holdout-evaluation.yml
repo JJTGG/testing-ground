@@ -1,0 +1,496 @@
+name: Inalpha Sealed Holdout Evaluation
+
+on:
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: timescale/timescaledb:latest-pg17
+        env:
+          POSTGRES_USER: quant
+          POSTGRES_PASSWORD: devpass
+          POSTGRES_DB: inalpha
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U quant -d inalpha"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    steps:
+      - name: Checkout Testing Ground
+        uses: actions/checkout@v4
+
+      - name: Checkout Inalpha
+        uses: actions/checkout@v4
+        with:
+          repository: mirror29/inalpha
+          ref: 3da8b103d61fc3c6af82ea479beade0cd7436e57
+          path: inalpha
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install migration dependencies
+        working-directory: inalpha/infra/migrations
+        run: uv sync --group dev
+
+      - name: Create disposable test database
+        env:
+          PGPASSWORD: devpass
+        run: |
+          psql \
+            -h 127.0.0.1 \
+            -p 5433 \
+            -U quant \
+            -d inalpha \
+            -c 'CREATE DATABASE inalpha_test;'
+
+      - name: Run Inalpha migrations
+        working-directory: inalpha/infra/migrations
+        env:
+          DATABASE_URL: postgresql+psycopg://quant:devpass@127.0.0.1:5433/inalpha_test
+        run: |
+          uv run alembic upgrade head
+
+      - name: Install Evolver dependencies
+        working-directory: inalpha/services/evolver
+        run: uv sync --group dev
+
+      - name: Install Paper dependencies
+        working-directory: inalpha/services/paper
+        run: uv sync --group dev
+
+      - name: Write sealed holdout evaluation audit
+        run: |
+          cat > inalpha/services/evolver/sealed-holdout-evaluation-audit.py <<'PY'
+          from __future__ import annotations
+
+          import asyncio
+          import hashlib
+          import json
+          from contextlib import asynccontextmanager
+          from datetime import UTC, datetime
+          from pathlib import Path
+          from uuid import uuid4
+
+          import pytest
+          from inalpha_evolver.config import EvolverSettings
+          from inalpha_evolver.hypothesis.compiler import compile_hypothesis
+          from inalpha_evolver.hypothesis.models import HypothesisSpec
+          from inalpha_evolver.runtime import campaign as runtime
+          from inalpha_evolver.storage import campaigns
+
+          from tests.test_loop_handoff import ready_loop
+
+          DATABASE_URL = (
+              "postgresql://quant:devpass@127.0.0.1:5433/inalpha_test"
+          )
+
+          RESULT_PATH = Path(
+              "sealed-holdout-evaluation-result.json"
+          )
+
+
+          class FakeDataClient:
+              """
+              Controlled replacement for only the external event-data HTTP
+              dependency.
+
+              The actual sealed holdout evaluator remains untouched.
+              """
+
+              def __init__(self, *args, **kwargs):
+                  self.args = args
+                  self.kwargs = kwargs
+
+              async def __aenter__(self):
+                  return self
+
+              async def __aexit__(self, exc_type, exc, tb):
+                  return False
+
+              async def get_event_snapshot(self, snapshot_id):
+                  return {
+                      "snapshot_id": str(snapshot_id),
+                      "cutoff": "2026-01-01T11:00:00+00:00",
+                      "policy_version": "testing-ground-sealed-v1",
+                      "events_sha256": hashlib.sha256(
+                          b"testing-ground-sealed-events"
+                      ).hexdigest(),
+                      "fact_count": 1,
+                      "facts": self.event_facts,
+                  }
+
+              event_facts = []
+
+
+          async def main() -> None:
+              # This script is executed through pytest so that we can reuse
+              # Inalpha's existing real DB fixtures and loop snapshot setup.
+              #
+              # The actual assertions live below in the pytest test.
+              raise RuntimeError(
+                  "This file is intended to be collected by pytest."
+              )
+
+
+          @pytest.mark.asyncio
+          async def test_real_sealed_holdout_evaluation(
+              database,
+              monkeypatch,
+          ):
+              worker, frozen, snapshot = await ready_loop(database)
+              owner = worker["owner_account_id"]
+
+              @asynccontextmanager
+              async def connection():
+                  yield database
+
+              monkeypatch.setattr(
+                  runtime,
+                  "get_conn",
+                  connection,
+              )
+
+              settings = EvolverSettings(
+                  DATABASE_URL=DATABASE_URL,
+                  EVENT_EVOLUTION_ENABLED=True,
+                  JWT_SECRET="testing-ground-sealed-holdout-secret-32-bytes",
+                  EVOLVER_JOB_TIMEOUT_S=120,
+                  EVOLVER_JOB_MEM_GB=2,
+              )
+
+              # Reuse Inalpha's actual campaign handoff machinery to create
+              # a real campaign bound to the frozen dataset.
+              async def fetch_event_snapshot(snapshot_id, **kwargs):
+                  return snapshot
+
+              from inalpha_evolver.runtime import loop_campaign
+
+              monkeypatch.setattr(
+                  loop_campaign,
+                  "get_conn",
+                  connection,
+              )
+              monkeypatch.setattr(
+                  loop_campaign,
+                  "fetch_event_snapshot",
+                  fetch_event_snapshot,
+              )
+
+              campaign_id = await loop_campaign.handoff_campaign(
+                  worker,
+                  settings,
+              )
+
+              campaign = await campaigns.get_campaign(
+                  database,
+                  campaign_id,
+                  owner,
+              )
+
+              assert campaign is not None
+              assert campaign["data_snapshot_id"] == frozen["snapshot_id"]
+
+              # Acquire a fresh campaign lease for the controlled audit.
+              lease = await campaigns.acquire_lease(
+                  database,
+                  campaign_id,
+                  worker_id="testing-ground-sealed-holdout",
+                  ttl_s=300,
+              )
+
+              assert lease is not None
+
+              campaign = await campaigns.get_campaign(
+                  database,
+                  campaign_id,
+                  owner,
+              )
+
+              hypothesis_row = campaign["hypotheses"][0]
+              hypothesis = HypothesisSpec.model_validate(
+                  hypothesis_row["spec"]
+              )
+
+              compiled = compile_hypothesis(hypothesis)
+
+              implementation = await campaigns.insert_implementation(
+                  database,
+                  campaign_id=campaign_id,
+                  hypothesis_id=hypothesis_row["hypothesis_id"],
+                  generation=int(hypothesis_row["generation"]),
+                  profile="testing-ground-sealed-holdout",
+                  source_code=compiled.source_code,
+                  source_hash=compiled.source_hash,
+                  lease_token=lease["lease_token"],
+              )
+
+              assert implementation is not None
+
+              # The database requires the locked implementation to exist
+              # before evolution_campaigns.locked_candidate_id can reference it.
+              await database.execute(
+                  """
+                  UPDATE evolution_campaigns
+                  SET
+                      status='holdout_ready',
+                      locked_candidate_id=%s,
+                      active_generation=max_generations,
+                      updated_at=clock_timestamp()
+                  WHERE campaign_id=%s
+                    AND owner_account_id=%s
+                    AND status='replaying'
+                    AND lease_token=%s
+                  """,
+                  (
+                      implementation["implementation_id"],
+                      campaign_id,
+                      owner,
+                      lease["lease_token"],
+                  ),
+              )
+
+              campaign = await campaigns.get_campaign(
+                  database,
+                  campaign_id,
+                  owner,
+              )
+
+              assert campaign["status"] == "holdout_ready"
+              assert (
+                  campaign["locked_candidate_id"]
+                  == implementation["implementation_id"]
+              )
+
+              # The actual sealed evaluator calls DataClient for the event
+              # snapshot. Replace only that external boundary with a controlled
+              # deterministic response.
+              FakeDataClient.event_facts = [
+                  {
+                      "fact_id": str(uuid4()),
+                      "event_type": str(hypothesis.event_types[0]),
+                      "severity": 0.8,
+                      "available_at": "2026-01-01T09:00:00Z",
+                  }
+              ]
+
+              monkeypatch.setattr(
+                  runtime,
+                  "DataClient",
+                  FakeDataClient,
+              )
+
+              # Execute the real production holdout state-machine branch.
+              #
+              # This calls:
+              #   reserve_holdout_attempt()
+              #   claim_holdout_attempt()
+              #   holdout_attempt_input()
+              #   evaluate_sealed_holdout()
+              #   FrozenDatasetEvaluator
+              #   KillableEngineRunner
+              #   finalize_holdout_attempt()
+              await runtime.execute_campaign(
+                  campaign,
+                  settings,
+              )
+
+              final_campaign = await campaigns.get_campaign(
+                  database,
+                  campaign_id,
+                  owner,
+              )
+
+              assert final_campaign is not None
+              assert final_campaign["status"] in {
+                  "graduated",
+                  "rejected",
+              }
+              assert final_campaign["holdout_consumed_at"] is not None
+
+              attempt_id = final_campaign["holdout_attempt_id"]
+
+              assert attempt_id is not None
+
+              async with database.cursor() as cur:
+                  await cur.execute(
+                      """
+                      SELECT
+                          attempt_id,
+                          campaign_id,
+                          candidate_id,
+                          status,
+                          passed,
+                          evidence
+                      FROM evolution_holdout_attempts
+                      WHERE attempt_id=%s
+                      """,
+                      (attempt_id,),
+                  )
+                  attempt = await cur.fetchone()
+
+              assert attempt is not None
+              assert attempt["campaign_id"] == campaign_id
+              assert (
+                  attempt["candidate_id"]
+                  == implementation["implementation_id"]
+              )
+              assert attempt["status"] in {
+                  "succeeded",
+                  "failed",
+              }
+              assert attempt["evidence"] is not None
+
+              evidence = attempt["evidence"]
+
+              assert "sealed_holdout" in evidence
+              assert "holdout_passed" in evidence
+
+              holdout_evidence = evidence["sealed_holdout"]
+
+              # These fields are produced by the REAL
+              # evaluate_sealed_holdout() implementation.
+              assert (
+                  holdout_evidence["source_hash"]
+                  == compiled.source_hash
+              )
+              assert (
+                  holdout_evidence["snapshot_id"]
+                  == str(campaign["event_snapshot_id"])
+              )
+              assert "metrics" in holdout_evidence
+              assert "event_study" in holdout_evidence
+              assert "thresholds" in holdout_evidence
+
+              metrics = holdout_evidence["metrics"]
+
+              assert "sharpe" in metrics
+              assert "total_return_pct" in metrics
+              assert "max_drawdown_pct" in metrics
+              assert "num_trades" in metrics
+              assert "num_bars" in metrics
+
+              # With 10 frozen bars and validation_split=0.8,
+              # the evaluator's final holdout is the final 2 bars.
+              assert metrics["num_bars"] == 2
+
+              # Run the state-machine branch again using the original campaign
+              # object. Because the holdout attempt has already been consumed,
+              # no second evaluation should occur.
+              await runtime.execute_campaign(
+                  campaign,
+                  settings,
+              )
+
+              async with database.cursor() as cur:
+                  await cur.execute(
+                      """
+                      SELECT count(*) AS count
+                      FROM evolution_holdout_attempts
+                      WHERE campaign_id=%s
+                      """,
+                      (campaign_id,),
+                  )
+                  count_row = await cur.fetchone()
+
+              assert count_row["count"] == 1
+
+              result = {
+                  "status": "completed",
+                  "test": "e2-real-sealed-holdout-evaluation",
+                  "inalpha_revision": (
+                      "3da8b103d61fc3c6af82ea479beade0cd7436e57"
+                  ),
+                  "campaign_id": str(campaign_id),
+                  "attempt_id": str(attempt_id),
+                  "candidate_id": str(
+                      implementation["implementation_id"]
+                  ),
+                  "candidate_source_hash": compiled.source_hash,
+                  "verified": {
+                      "real_execute_campaign_holdout_branch": True,
+                      "real_sealed_holdout_evaluator": True,
+                      "real_frozen_dataset_evaluator": True,
+                      "real_killable_engine_runner": True,
+                      "locked_candidate_identity_preserved": True,
+                      "final_holdout_metrics_produced": True,
+                      "sealed_holdout_evidence_persisted": True,
+                      "holdout_consumed_once": True,
+                      "second_execution_did_not_create_new_attempt": True,
+                  },
+                  "metrics": metrics,
+                  "terminal_campaign_status": final_campaign["status"],
+                  "limitations": [
+                      (
+                          "The market dataset is synthetic and therefore "
+                          "does not establish strategy quality or real-market "
+                          "performance."
+                      ),
+                      (
+                          "The external event snapshot HTTP boundary was "
+                          "replaced with a deterministic fixture."
+                      ),
+                      (
+                          "The test verifies the actual sealed evaluation "
+                          "machinery, not production data-service behavior."
+                      ),
+                  ],
+              }
+
+              RESULT_PATH.write_text(
+                  json.dumps(result, indent=2, default=str) + "\n",
+                  encoding="utf-8",
+              )
+
+              print(json.dumps(result, indent=2, default=str))
+
+
+          if __name__ == "__main__":
+              # pytest collects this file; keep the module import-safe.
+              pass
+          PY
+
+      - name: Run real sealed holdout evaluation
+        working-directory: inalpha/services/evolver
+        env:
+          EVOLVER_TEST_DATABASE_URL: postgresql+psycopg://quant:devpass@127.0.0.1:5433/inalpha_test
+          DATABASE_URL: postgresql+psycopg://quant:devpass@127.0.0.1:5433/inalpha_test
+        run: |
+          set -o pipefail
+          uv run pytest \
+            sealed-holdout-evaluation-audit.py \
+            -v \
+            2>&1 | tee sealed-holdout-evaluation-output.txt
+
+      - name: Preserve result in Testing Ground
+        if: success()
+        run: |
+          mkdir -p experiments/inalpha/results
+
+          cp \
+            inalpha/services/evolver/sealed-holdout-evaluation-result.json \
+            "experiments/inalpha/results/e2-sealed-holdout-evaluation-${GITHUB_RUN_ID}.json"
+
+          cp \
+            inalpha/services/evolver/sealed-holdout-evaluation-output.txt \
+            "experiments/inalpha/results/e2-sealed-holdout-evaluation-${GITHUB_RUN_ID}.txt"
+
+      - name: Upload audit result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inalpha-e2-sealed-holdout-evaluation
+          path: |
+            inalpha/services/evolver/sealed-holdout-evaluation-result.json
+            inalpha/services/evolver/sealed-holdout-evaluation-output.txt
+            experiments/inalpha/results/e2-sealed-holdout-evaluation-${{ github.run_id }}.json
+            experiments/inalpha/results/e2-sealed-holdout-evaluation-${{ github.run_id }}.txt
